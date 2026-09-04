@@ -224,8 +224,34 @@ def create_project(
     return row
 
 
+def _claim_project_version(db: Session, project: WorkProject, version: int) -> None:
+    if project.version != version:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Project version conflict")
+    now = utc_now()
+    result = db.exec(
+        sa_update(WorkProject)
+        .where(
+            WorkProject.id == project.id,
+            WorkProject.tenant_id == project.tenant_id,
+            WorkProject.version == version,
+        )
+        .values(version=version + 1, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Project version conflict")
+    project.version = version + 1
+    project.updated_at = now
+
+
 def update_project(
-    db: Session, project: WorkProject, values: dict[str, Any], actor_user_id: str
+    db: Session,
+    project: WorkProject,
+    values: dict[str, Any],
+    version: int,
+    actor_user_id: str,
 ) -> WorkProject:
     access = WorkbenchAccess.for_user(db, project.tenant_id, actor_user_id)
     _ensure_project_manager(access, project)
@@ -236,6 +262,7 @@ def update_project(
     if values.get("owner_user_id"):
         user_for_tenant(db, project.tenant_id, values["owner_user_id"])
     old_status = project.status
+    _claim_project_version(db, project, version)
     for key, value in values.items():
         setattr(project, key, value)
     project.updated_at = utc_now()
@@ -324,6 +351,21 @@ def _dependency_ids(db: Session, tenant_id: str, task_id: str) -> list[str]:
     )
 
 
+def _dependencies_are_ready(db: Session, task: WorkTask) -> bool:
+    dependency_ids = _dependency_ids(db, task.tenant_id, task.id)
+    if not dependency_ids:
+        return True
+    dependencies = db.exec(
+        select(WorkTask).where(
+            WorkTask.tenant_id == task.tenant_id,
+            WorkTask.id.in_(dependency_ids),
+        )
+    ).all()
+    return len(dependencies) == len(dependency_ids) and all(
+        dependency.status == "done" for dependency in dependencies
+    )
+
+
 def _would_cycle(db: Session, tenant_id: str, task_id: str, dependency_ids: Iterable[str]) -> bool:
     graph: dict[str, set[str]] = {}
     rows = db.exec(
@@ -382,10 +424,17 @@ def create_task(
     project = project_for_tenant(db, tenant_id, values["project_id"])
     access = WorkbenchAccess.for_user(db, tenant_id, actor_user_id)
     _ensure_project_manager(access, project)
-    dependencies = _validate_task_references(db, tenant_id, project, values, dependency_ids)
-    status = values.pop("status", None)
-    if dependencies and any(dependency.status != "done" for dependency in dependencies):
-        status = "blocked"
+    _claim_project_version(db, project, project.version)
+    try:
+        dependencies = _validate_task_references(
+            db, tenant_id, project, values, dependency_ids
+        )
+        status = values.pop("status", None)
+        if dependencies and any(dependency.status != "done" for dependency in dependencies):
+            status = "blocked"
+    except HTTPException:
+        db.rollback()
+        raise
     row = WorkTask(tenant_id=tenant_id, status=status or "backlog", **values)
     db.add(row)
     db.flush()
@@ -406,14 +455,11 @@ def create_task(
     return row
 
 
-def _check_version(task: WorkTask, version: int) -> None:
-    if task.version != version:
-        raise HTTPException(status_code=409, detail="Task version conflict")
-
-
 def _claim_version(db: Session, task: WorkTask, version: int) -> None:
     """Atomically reserve the requested version before writing task state and its event."""
-    _check_version(task, version)
+    if task.version != version:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Task version conflict")
     result = db.exec(
         sa_update(WorkTask)
         .where(
@@ -484,26 +530,53 @@ def update_task(
             raise HTTPException(status_code=422, detail="Invalid task status transition")
         if task.status == "backlog" and requested_status == "in_progress":
             _ensure_executor(access, project, task)
-        elif requested_status == "canceled":
+        elif (
+            task.status == "blocked" and requested_status == "backlog"
+        ) or requested_status == "canceled":
             _ensure_project_manager(access, project)
         else:
             raise HTTPException(status_code=422, detail="Use submit or review for this transition")
 
-    dependencies = _validate_task_references(
-        db, task.tenant_id, project, values, dependency_ids or []
+    if dependency_ids is not None and requested_status not in {None, task.status}:
+        raise HTTPException(
+            status_code=422,
+            detail="Change task status and dependencies in separate requests",
+        )
+    graph_mutation = dependency_ids is not None or (
+        old_status == "blocked" and requested_status == "backlog"
     )
-    if dependency_ids is not None and (
-        task.id in dependency_ids
-        or _would_cycle(db, task.tenant_id, task.id, dependency_ids)
-    ):
-        raise HTTPException(status_code=422, detail="Task dependency cycle detected")
+    if graph_mutation:
+        _claim_project_version(db, project, project.version)
+    try:
+        if (
+            old_status == "blocked"
+            and requested_status == "backlog"
+            and not _dependencies_are_ready(db, task)
+        ):
+            raise HTTPException(
+                status_code=422, detail="Task dependencies are not complete"
+            )
+        dependencies = _validate_task_references(
+            db, task.tenant_id, project, values, dependency_ids or []
+        )
+        if dependency_ids is not None and (
+            task.id in dependency_ids
+            or _would_cycle(db, task.tenant_id, task.id, dependency_ids)
+        ):
+            raise HTTPException(status_code=422, detail="Task dependency cycle detected")
+    except HTTPException:
+        if graph_mutation:
+            db.rollback()
+        raise
     _claim_version(db, task, version)
     if dependency_ids is not None:
         _replace_dependencies(db, task, dependencies)
-        if dependencies and any(row.status != "done" for row in dependencies):
-            task.status = "blocked"
-        elif task.status == "blocked":
-            task.status = "backlog"
+        if task.status in {"backlog", "blocked"}:
+            task.status = (
+                "blocked"
+                if dependencies and any(row.status != "done" for row in dependencies)
+                else "backlog"
+            )
     for key, value in values.items():
         setattr(task, key, value)
     if task.status == "in_progress" and old_status == "backlog" and task.start_date is None:
@@ -514,6 +587,9 @@ def update_task(
     event_written = False
     if task.status == "in_progress" and old_status == "backlog":
         _event(db, task, "task_started", actor_user_id, old_status, task.status)
+        event_written = True
+    if task.status == "backlog" and old_status == "blocked":
+        _event(db, task, "task_unblocked", actor_user_id, old_status, task.status)
         event_written = True
     if task.status == "canceled" and old_status != "canceled":
         _event(db, task, "task_canceled", actor_user_id, old_status, task.status)
@@ -616,10 +692,15 @@ def submit_task(
     return task
 
 
-def _activate_ready_tasks(db: Session, tenant_id: str) -> list[WorkTask]:
-    blocked = db.exec(
-        select(WorkTask).where(WorkTask.tenant_id == tenant_id, WorkTask.status == "blocked")
-    ).all()
+def _activate_ready_tasks(
+    db: Session, tenant_id: str, project_id: str | None = None
+) -> list[WorkTask]:
+    statement = select(WorkTask).where(
+        WorkTask.tenant_id == tenant_id, WorkTask.status == "blocked"
+    )
+    if project_id:
+        statement = statement.where(WorkTask.project_id == project_id)
+    blocked = db.exec(statement).all()
     activated: list[WorkTask] = []
     for task in blocked:
         dependency_ids = _dependency_ids(db, tenant_id, task.id)
@@ -632,9 +713,24 @@ def _activate_ready_tasks(db: Session, tenant_id: str) -> list[WorkTask]:
             row.status == "done" for row in dependencies
         ):
             old_status = task.status
+            next_version = task.version + 1
+            now = utc_now()
+            result = db.exec(
+                sa_update(WorkTask)
+                .where(
+                    WorkTask.id == task.id,
+                    WorkTask.tenant_id == tenant_id,
+                    WorkTask.status == "blocked",
+                    WorkTask.version == task.version,
+                )
+                .values(status="backlog", version=next_version, updated_at=now)
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount != 1:
+                continue
             task.status = "backlog"
-            task.version += 1
-            task.updated_at = utc_now()
+            task.version = next_version
+            task.updated_at = now
             db.add(task)
             _event(
                 db,
@@ -650,7 +746,18 @@ def _activate_ready_tasks(db: Session, tenant_id: str) -> list[WorkTask]:
 
 
 def activate_ready_tasks(db: Session, tenant_id: str) -> list[WorkTask]:
-    activated = _activate_ready_tasks(db, tenant_id)
+    project_ids = list(
+        db.exec(
+            select(WorkTask.project_id)
+            .where(WorkTask.tenant_id == tenant_id, WorkTask.status == "blocked")
+            .distinct()
+        ).all()
+    )
+    activated: list[WorkTask] = []
+    for project_id in project_ids:
+        project = project_for_tenant(db, tenant_id, project_id)
+        _claim_project_version(db, project, project.version)
+        activated.extend(_activate_ready_tasks(db, tenant_id, project_id))
     db.commit()
     for task in activated:
         db.refresh(task)
@@ -674,6 +781,8 @@ def review_task(
             status_code=422, detail="Task cannot be reviewed from its current status"
         )
     old_status = task.status
+    if verdict == "approve":
+        _claim_project_version(db, project, project.version)
     _claim_version(db, task, version)
     task.status = new_status
     if verdict == "approve":
@@ -693,7 +802,7 @@ def review_task(
         {"comment": comment},
     )
     if verdict == "approve":
-        _activate_ready_tasks(db, task.tenant_id)
+        _activate_ready_tasks(db, task.tenant_id, project.id)
     db.commit()
     db.refresh(task)
     return task
@@ -755,8 +864,11 @@ def list_visible_tasks(
 
 def dashboard_for_user(db: Session, tenant_id: str, user_id: str) -> dict[str, Any]:
     access = WorkbenchAccess.for_user(db, tenant_id, user_id)
+    tenant_tasks = list(
+        db.exec(select(WorkTask).where(WorkTask.tenant_id == tenant_id)).all()
+    )
+    tasks = [task for task in tenant_tasks if _visible_task(db, access, task)]
     if access.can_view_all:
-        tasks = list(db.exec(select(WorkTask).where(WorkTask.tenant_id == tenant_id)).all())
         employees = list(
             db.exec(
                 select(EmployeeProfile).where(
@@ -766,19 +878,6 @@ def dashboard_for_user(db: Session, tenant_id: str, user_id: str) -> dict[str, A
             ).all()
         )
     elif access.managed_department_ids:
-        project_ids = db.exec(
-            select(WorkProject.id).where(
-                WorkProject.tenant_id == tenant_id,
-                WorkProject.department_id.in_(access.managed_department_ids),
-            )
-        ).all()
-        tasks = list(
-            db.exec(
-                select(WorkTask).where(
-                    WorkTask.tenant_id == tenant_id, WorkTask.project_id.in_(project_ids)
-                )
-            ).all()
-        )
         employees = list(
             db.exec(
                 select(EmployeeProfile).where(
@@ -789,14 +888,6 @@ def dashboard_for_user(db: Session, tenant_id: str, user_id: str) -> dict[str, A
             ).all()
         )
     else:
-        tasks = list(
-            db.exec(
-                select(WorkTask).where(
-                    WorkTask.tenant_id == tenant_id,
-                    (WorkTask.assignee_user_id == user_id) | (WorkTask.reviewer_user_id == user_id),
-                )
-            ).all()
-        )
         profile = employee_for_user(db, tenant_id, user_id)
         employees = [profile] if profile and profile.status == "active" else []
 
@@ -838,8 +929,13 @@ def dashboard_for_user(db: Session, tenant_id: str, user_id: str) -> dict[str, A
         and (
             access.can_view_all
             or task.reviewer_user_id == user_id
-            or project_for_tenant(db, tenant_id, task.project_id).department_id
-            in access.managed_department_ids
+            or (
+                project_for_tenant(db, tenant_id, task.project_id).owner_user_id == user_id
+            )
+            or (
+                project_for_tenant(db, tenant_id, task.project_id).department_id
+                in access.managed_department_ids
+            )
         )
     ]
     workload_rows: list[dict[str, Any]] = []
@@ -890,6 +986,7 @@ def _project_values(project: WorkProject) -> dict[str, Any]:
         "start_date": project.start_date,
         "due_date": project.due_date,
         "budget": project.budget,
+        "version": project.version,
         "created_at": project.created_at,
         "updated_at": project.updated_at,
     }

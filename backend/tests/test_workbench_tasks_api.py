@@ -14,12 +14,19 @@ from app.db.models import (
     EmployeeProfile,
     Tenant,
     User,
+    WorkProject,
     WorkTask,
     WorkTaskEvent,
+    utc_now,
 )
 from app.main import app
 from app.security.auth import create_access_token
-from app.workbench.service import WORK_TASK_TRANSITIONS, update_task
+from app.workbench.service import (
+    WORK_TASK_TRANSITIONS,
+    review_task,
+    update_project,
+    update_task,
+)
 
 
 def _headers(user: dict[str, str]) -> dict[str, str]:
@@ -612,5 +619,331 @@ def test_optimistic_lock_rejects_a_second_session_that_loaded_the_old_version() 
             assert persisted is not None
             assert persisted.title == "first writer"
             assert persisted.version == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_generic_update_handles_manual_unblock_cancel_and_illegal_transitions() -> None:
+    client, _, rows = _client_and_rows()
+    try:
+        project = _create_project(client, rows)
+        blocked = client.post(
+            "/api/enterprise/workbench/tasks",
+            headers=_headers(rows["manager"]),
+            json={
+                "tenant_id": "tenant_a",
+                "project_id": project["id"],
+                "title": "Manual hold",
+                "status": "blocked",
+                "assignee_user_id": rows["member"]["id"],
+            },
+        ).json()
+
+        unblocked = client.put(
+            f"/api/enterprise/workbench/tasks/{blocked['id']}",
+            headers=_headers(rows["manager"]),
+            json={"tenant_id": "tenant_a", "version": 0, "status": "backlog"},
+        )
+        assert unblocked.status_code == 200, unblocked.text
+        assert unblocked.json()["status"] == "backlog"
+
+        illegal = client.put(
+            f"/api/enterprise/workbench/tasks/{blocked['id']}",
+            headers=_headers(rows["manager"]),
+            json={
+                "tenant_id": "tenant_a",
+                "version": unblocked.json()["version"],
+                "status": "done",
+            },
+        )
+        assert illegal.status_code == 422
+
+        canceled = client.put(
+            f"/api/enterprise/workbench/tasks/{blocked['id']}",
+            headers=_headers(rows["manager"]),
+            json={
+                "tenant_id": "tenant_a",
+                "version": unblocked.json()["version"],
+                "status": "canceled",
+            },
+        )
+        assert canceled.status_code == 200, canceled.text
+        assert canceled.json()["status"] == "canceled"
+
+        invalid_terminal = client.put(
+            f"/api/enterprise/workbench/tasks/{blocked['id']}",
+            headers=_headers(rows["manager"]),
+            json={
+                "tenant_id": "tenant_a",
+                "version": canceled.json()["version"],
+                "status": "backlog",
+            },
+        )
+        assert invalid_terminal.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_dependency_edits_do_not_rewrite_active_or_terminal_state() -> None:
+    client, engine, rows = _client_and_rows()
+    try:
+        project = _create_project(client, rows)
+        dependency = _create_task(client, rows, project["id"], "Dependency")
+        task_ids: dict[str, str] = {}
+        with Session(engine) as db:
+            for status in ("in_progress", "review", "done", "canceled"):
+                task = WorkTask(
+                    tenant_id="tenant_a",
+                    project_id=project["id"],
+                    title=f"State {status}",
+                    status=status,
+                    assignee_user_id=rows["member"]["id"],
+                    reviewer_user_id=rows["reviewer"]["id"],
+                    completed_at=utc_now() if status == "done" else None,
+                )
+                db.add(task)
+                db.flush()
+                task_ids[status] = task.id
+            db.commit()
+
+        for status, task_id in task_ids.items():
+            before = client.get(
+                f"/api/enterprise/workbench/tasks/{task_id}",
+                params={"tenant_id": "tenant_a"},
+                headers=_headers(rows["manager"]),
+            ).json()
+            response = client.put(
+                f"/api/enterprise/workbench/tasks/{task_id}",
+                headers=_headers(rows["manager"]),
+                json={
+                    "tenant_id": "tenant_a",
+                    "version": before["version"],
+                    "dependencies": [dependency["id"]],
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["status"] == status
+            assert response.json()["completed_at"] == before["completed_at"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_project_update_uses_database_compare_and_swap() -> None:
+    client, engine, rows = _client_and_rows()
+    try:
+        project = _create_project(client, rows)
+        assert project["version"] == 0
+        with Session(engine) as first, Session(engine) as second:
+            first_copy = first.get(WorkProject, project["id"])
+            second_copy = second.get(WorkProject, project["id"])
+            assert first_copy is not None
+            assert second_copy is not None
+
+            updated = update_project(
+                first,
+                first_copy,
+                {"name": "first project writer"},
+                0,
+                rows["manager"]["id"],
+            )
+            assert updated.version == 1
+            with pytest.raises(HTTPException) as conflict:
+                update_project(
+                    second,
+                    second_copy,
+                    {"name": "stale project writer"},
+                    0,
+                    rows["manager"]["id"],
+                )
+            assert conflict.value.status_code == 409
+
+        with Session(engine) as db:
+            persisted = db.get(WorkProject, project["id"])
+            assert persisted is not None
+            assert persisted.name == "first project writer"
+            assert persisted.version == 1
+
+        stale_response = client.put(
+            f"/api/enterprise/workbench/projects/{project['id']}",
+            headers=_headers(rows["manager"]),
+            json={
+                "tenant_id": "tenant_a",
+                "version": 0,
+                "objective": "stale API overwrite",
+            },
+        )
+        assert stale_response.status_code == 409
+        fresh_response = client.put(
+            f"/api/enterprise/workbench/projects/{project['id']}",
+            headers=_headers(rows["manager"]),
+            json={
+                "tenant_id": "tenant_a",
+                "version": 1,
+                "objective": "fresh API update",
+            },
+        )
+        assert fresh_response.status_code == 200, fresh_response.text
+        assert fresh_response.json()["version"] == 2
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_parallel_prerequisite_completion_conflicts_then_unblocks_once() -> None:
+    client, engine, rows = _client_and_rows()
+    try:
+        project = _create_project(client, rows)
+        task_a = _create_task(client, rows, project["id"], "Parallel A")
+        task_b = _create_task(client, rows, project["id"], "Parallel B")
+        successor = _create_task(
+            client, rows, project["id"], "Parallel successor", [task_a["id"], task_b["id"]]
+        )
+        review_tasks = []
+        for task in (task_a, task_b):
+            started = client.put(
+                f"/api/enterprise/workbench/tasks/{task['id']}",
+                headers=_headers(rows["member"]),
+                json={"tenant_id": "tenant_a", "version": 0, "status": "in_progress"},
+            ).json()
+            review_tasks.append(
+                client.post(
+                    f"/api/enterprise/workbench/tasks/{task['id']}/submit",
+                    headers=_headers(rows["member"]),
+                    json={
+                        "tenant_id": "tenant_a",
+                        "version": started["version"],
+                        "result_summary": task["title"],
+                        "artifact_refs": [],
+                    },
+                ).json()
+            )
+
+        with Session(engine) as first, Session(engine) as second:
+            first_project = first.get(WorkProject, project["id"])
+            second_project = second.get(WorkProject, project["id"])
+            assert first_project is not None
+            assert second_project is not None
+            assert first_project.version == second_project.version
+            first_task = first.get(WorkTask, review_tasks[0]["id"])
+            second_task = second.get(WorkTask, review_tasks[1]["id"])
+            assert first_task is not None
+            assert second_task is not None
+            review_task(
+                first,
+                first_task,
+                review_tasks[0]["version"],
+                "approve",
+                None,
+                rows["reviewer"]["id"],
+            )
+            with pytest.raises(HTTPException) as conflict:
+                review_task(
+                    second,
+                    second_task,
+                    review_tasks[1]["version"],
+                    "approve",
+                    None,
+                    rows["reviewer"]["id"],
+                )
+            assert conflict.value.status_code == 409
+
+        with Session(engine) as retry:
+            retry_task = retry.get(WorkTask, review_tasks[1]["id"])
+            assert retry_task is not None
+            review_task(
+                retry,
+                retry_task,
+                review_tasks[1]["version"],
+                "approve",
+                None,
+                rows["reviewer"]["id"],
+            )
+
+        with Session(engine) as db:
+            persisted_successor = db.get(WorkTask, successor["id"])
+            assert persisted_successor is not None
+            assert persisted_successor.status == "backlog"
+            unblocked_events = db.exec(
+                select(WorkTaskEvent).where(
+                    WorkTaskEvent.task_id == successor["id"],
+                    WorkTaskEvent.event_type == "dependency_unblocked",
+                )
+            ).all()
+            assert len(unblocked_events) == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_dashboard_includes_cross_department_assignment_review_and_owned_project_tasks() -> None:
+    client, _, rows = _client_and_rows()
+    try:
+        task_ids = []
+        for relation in ("assignee", "reviewer", "owner"):
+            project_response = client.post(
+                "/api/enterprise/workbench/projects",
+                headers=_headers(rows["manager"]),
+                json={
+                    "tenant_id": "tenant_a",
+                    "name": f"Cross department {relation}",
+                    "objective": "Verify dashboard scope",
+                    "department_id": rows["engineering"]["id"],
+                    "owner_user_id": (
+                        rows["other"]["id"] if relation == "owner" else rows["manager"]["id"]
+                    ),
+                },
+            )
+            assert project_response.status_code == 201, project_response.text
+            task_response = client.post(
+                "/api/enterprise/workbench/tasks",
+                headers=_headers(rows["manager"]),
+                json={
+                    "tenant_id": "tenant_a",
+                    "project_id": project_response.json()["id"],
+                    "title": relation,
+                    "assignee_user_id": (
+                        rows["other"]["id"] if relation == "assignee" else rows["member"]["id"]
+                    ),
+                    "reviewer_user_id": (
+                        rows["other"]["id"]
+                        if relation == "reviewer"
+                        else rows["reviewer"]["id"]
+                    ),
+                },
+            )
+            assert task_response.status_code == 201, task_response.text
+            task_ids.append(task_response.json()["id"])
+
+        dashboard = client.get(
+            "/api/enterprise/workbench/dashboard",
+            params={"tenant_id": "tenant_a"},
+            headers=_headers(rows["other"]),
+        )
+        assert dashboard.status_code == 200, dashboard.text
+        assert dashboard.json()["task_counts"] == {"backlog": 3}
+        recent_task_ids = {event["task_id"] for event in dashboard.json()["recent_events"]}
+        assert set(task_ids).issubset(recent_task_ids)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_explicit_null_for_non_nullable_project_and_task_fields_returns_422() -> None:
+    client, _, rows = _client_and_rows()
+    try:
+        project = _create_project(client, rows)
+        task = _create_task(client, rows, project["id"], "Null guarded")
+        project_response = client.put(
+            f"/api/enterprise/workbench/projects/{project['id']}",
+            headers=_headers(rows["manager"]),
+            json={"tenant_id": "tenant_a", "version": 0, "name": None},
+        )
+        assert project_response.status_code == 422
+        assert any(item["loc"][-1] == "name" for item in project_response.json()["detail"])
+
+        task_response = client.put(
+            f"/api/enterprise/workbench/tasks/{task['id']}",
+            headers=_headers(rows["manager"]),
+            json={"tenant_id": "tenant_a", "version": 0, "progress": None},
+        )
+        assert task_response.status_code == 422
+        assert any(item["loc"][-1] == "progress" for item in task_response.json()["detail"])
     finally:
         app.dependency_overrides.clear()

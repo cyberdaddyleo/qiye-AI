@@ -8,7 +8,7 @@ from datetime import date, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlmodel import Session, select
 
 from app.db import get_session
@@ -133,6 +133,7 @@ class ProjectCreate(BaseModel):
 
 class ProjectUpdate(BaseModel):
     tenant_id: str
+    version: int
     name: str | None = Field(default=None, min_length=1, max_length=200)
     objective: str | None = Field(default=None, min_length=1, max_length=4_000)
     description: str | None = Field(default=None, max_length=10_000)
@@ -145,6 +146,13 @@ class ProjectUpdate(BaseModel):
     budget: float | None = Field(default=None, ge=0)
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name", "objective", "status", "health", mode="before")
+    @classmethod
+    def reject_null_required_fields(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("field cannot be null")
+        return value
 
 
 class TaskCreate(BaseModel):
@@ -185,6 +193,13 @@ class TaskMutation(BaseModel):
     dependencies: list[str] | None = None
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("title", "priority", "status", "progress", "dependencies", mode="before")
+    @classmethod
+    def reject_null_required_fields(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("field cannot be null")
+        return value
 
 
 class TaskComment(BaseModel):
@@ -362,8 +377,11 @@ def update_project_endpoint(
 ) -> dict[str, object]:
     _access(db, request.tenant_id, current_user)
     row = project_for_tenant(db, request.tenant_id, project_id)
-    values = request.model_dump(exclude_unset=True, exclude={"tenant_id"})
-    return _project_response(db, update_project(db, row, values, current_user.id))
+    values = request.model_dump(exclude_unset=True, exclude={"tenant_id", "version"})
+    return _project_response(
+        db,
+        update_project(db, row, values, request.version, current_user.id),
+    )
 
 
 @router.post("/tasks", response_model=TaskRead, status_code=201)

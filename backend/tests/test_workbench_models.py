@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -17,7 +18,13 @@ from app.db.models import (
     WorkTaskDependency,
     WorkTaskEvent,
 )
-from app.workbench.schema import PlanPreviewRequest, PlanRead, TaskRead, TaskUpdateRequest
+from app.workbench.schema import (
+    PlanPreviewRequest,
+    PlanRead,
+    ProjectRead,
+    TaskRead,
+    TaskUpdateRequest,
+)
 
 
 @pytest.fixture
@@ -110,6 +117,7 @@ def test_workbench_models_round_trip_and_constraints(db: Session, user: User) ->
     event_id = event.id
     db.expire_all()
     assert db.get(WorkProject, project_id).status == "active"
+    assert db.get(WorkProject, project_id).version == 0
     assert db.get(WorkPlan, plan_id).status == "draft"
     persisted_task = db.get(WorkTask, task_one_id)
     assert persisted_task.status == "backlog"
@@ -197,3 +205,46 @@ def test_workbench_dtos_are_strict_and_normalize_plan_credentials() -> None:
     ]
     assert task.dependencies == []
     assert task.events == []
+
+    project = ProjectRead(
+        id="project_1",
+        tenant_id="tenant_1",
+        name="Delivery",
+        objective="Ship",
+        status="active",
+        health="on_track",
+        version=3,
+        created_at="2026-09-04T00:00:00",
+        updated_at="2026-09-04T00:00:00",
+    )
+    assert project.version == 3
+
+
+def test_workbench_project_version_migrates_existing_sqlite_table() -> None:
+    from app.db.database import _migrate_workbench_schema
+
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE workbench_projects ("
+                "id VARCHAR PRIMARY KEY, tenant_id VARCHAR NOT NULL, "
+                "name VARCHAR NOT NULL, objective VARCHAR NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO workbench_projects (id, tenant_id, name, objective) "
+                "VALUES ('project_old', 'tenant_1', 'Old', 'Ship')"
+            )
+        )
+        _migrate_workbench_schema(
+            connection, inspect(connection), {"workbench_projects"}
+        )
+        _migrate_workbench_schema(
+            connection, inspect(connection), {"workbench_projects"}
+        )
+        version = connection.execute(
+            text("SELECT version FROM workbench_projects WHERE id = 'project_old'")
+        ).scalar_one()
+        assert version == 0

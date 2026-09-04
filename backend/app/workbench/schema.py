@@ -68,6 +68,7 @@ class ProjectRead(BaseModel):
     start_date: date | None = None
     due_date: date | None = None
     budget: float | None = None
+    version: int
     created_at: datetime
     updated_at: datetime
 
