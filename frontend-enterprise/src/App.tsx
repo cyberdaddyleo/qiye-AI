@@ -71,6 +71,9 @@ import ToolsPage, {
   ToolTestPage,
 } from "./pages/ToolsPage";
 import WorkbenchLayout from "./pages/workbench/WorkbenchLayout";
+import WorkbenchDashboardPage from "./pages/workbench/WorkbenchDashboardPage";
+import ProjectsPage from "./pages/workbench/ProjectsPage";
+import OrganizationPage from "./pages/workbench/OrganizationPage";
 import { useIsMobile } from "./hooks/use-mobile";
 import {
   Dialog,
@@ -591,9 +594,7 @@ function Shell({
               <Route
                 path={`${EnterpriseRoute.Workbench}/*`}
                 element={
-                  <WorkbenchLayout
-                    title="企业工作台"
-                    description="掌握项目、任务、人员负载与协作动态"
+                  <WorkbenchDashboardPage
                     currentUser={auth.user}
                     onLogout={onLogout}
                   />
@@ -602,9 +603,7 @@ function Shell({
               <Route
                 path={`${EnterpriseRoute.Projects}/*`}
                 element={
-                  <WorkbenchLayout
-                    title="项目中心"
-                    description="创建项目并跟踪目标、进度与健康状态"
+                  <ProjectsPage
                     currentUser={auth.user}
                     onLogout={onLogout}
                   />
@@ -646,11 +645,10 @@ function Shell({
               <Route
                 path={`${EnterpriseRoute.Organization}/*`}
                 element={
-                  <WorkbenchLayout
-                    title="组织与权限"
-                    description="维护部门、员工档案、容量与 AI 助理绑定"
+                  <OrganizationPage
                     currentUser={auth.user}
                     onLogout={onLogout}
+                    assistants={agents}
                   />
                 }
               />

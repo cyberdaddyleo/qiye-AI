@@ -44,4 +44,22 @@ describe('WorkbenchLayout', () => {
     await user.click(await screen.findByRole('menuitem', { name: '退出登录' }));
     expect(onLogout).toHaveBeenCalledOnce();
   });
+
+  it('stacks the toolbar below an unbroken title on narrow screens', () => {
+    render(
+      <I18nProvider>
+        <WorkbenchLayout
+          title="组织架构"
+          description="查看部门与员工，维护真人团队的职责、技能和工作容量"
+          currentUser={currentUser}
+          actions={<button type="button">导入员工</button>}
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByRole('banner').classList.contains('max-[640px]:flex-col')).toBe(true);
+    expect(
+      screen.getByRole('heading', { name: '组织架构' }).classList.contains('whitespace-nowrap'),
+    ).toBe(true);
+  });
 });
