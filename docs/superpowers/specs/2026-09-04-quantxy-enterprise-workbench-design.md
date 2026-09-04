@@ -111,6 +111,7 @@ StaffDeck 现有产品以数字员工（`AgentProfile`）为主要工作主体�
 - `source`: `model | fallback`
 - `variants_json`：三套方案及其指标、任务映射、分配理由和风险
 - `selected_variant`
+- `dispatch_idempotency_key`（首次下发时写入，同租户唯一）
 - `created_at`, `updated_at`, `dispatched_at`
 
 ### `WorkTask`
@@ -290,4 +291,3 @@ API 返回共享 schema，前端不根据页面自行推导权限或状态机。
 4. 企业工作台壳层、导航与共享 API 类型。
 5. 驾驶舱、调度、任务、员工和组织页面。
 6. 种子数据、端到端回归、构建与本地部署验证。
-
