@@ -17,6 +17,7 @@ __pycache__/
 .venv/
 venv/
 .dev/
+.worktrees/
 edgeclaw-opc/
 exports/
 dist/
