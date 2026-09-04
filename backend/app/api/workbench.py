@@ -37,19 +37,29 @@ from app.workbench.permissions import (
     can_view_employee,
     require_global_manager,
 )
-from app.workbench.schema import TaskRead, TaskReviewRequest, WorkTaskEventRead
+from app.workbench.schema import (
+    PlanPreviewRequest,
+    PlanRead,
+    TaskRead,
+    TaskReviewRequest,
+    WorkTaskEventRead,
+)
 from app.workbench.service import (
     add_task_comment,
+    build_plan,
     create_employee,
     create_project,
     create_task,
     dashboard_for_user,
     delete_employee,
     department_for_tenant,
+    dispatch_plan,
     employee_for_tenant,
+    ensure_plan_visible,
     ensure_task_visible,
     list_visible_projects,
     list_visible_tasks,
+    plan_for_tenant,
     project_for_tenant,
     project_progress,
     review_task,
@@ -219,6 +229,14 @@ class TaskSubmit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PlanDispatchRequest(BaseModel):
+    tenant_id: str
+    variant_key: Literal["A", "B", "C"]
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class DepartmentResponse(BaseModel):
     id: str
     tenant_id: str
@@ -307,6 +325,10 @@ def _task_response(db: Session, row: WorkTask) -> TaskRead:
     return TaskRead.model_validate(values)
 
 
+def _plan_response(row: object) -> PlanRead:
+    return PlanRead.model_validate(row, from_attributes=True)
+
+
 def _project_response(db: Session, row: WorkProject) -> dict[str, object]:
     return {**row.model_dump(), **project_progress(db, row)}
 
@@ -382,6 +404,52 @@ def update_project_endpoint(
         db,
         update_project(db, row, values, request.version, current_user.id),
     )
+
+
+@router.post("/plans/preview", response_model=PlanRead, status_code=201)
+def preview_plan_endpoint(
+    request: PlanPreviewRequest,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> PlanRead:
+    _access(db, request.tenant_id, current_user)
+    return _plan_response(build_plan(db, request, current_user))
+
+
+@router.get("/plans/{plan_id}", response_model=PlanRead)
+def get_plan_endpoint(
+    plan_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> PlanRead:
+    _access(db, tenant_id, current_user)
+    row = plan_for_tenant(db, tenant_id, plan_id)
+    ensure_plan_visible(db, row, current_user.id)
+    return _plan_response(row)
+
+
+@router.post("/plans/{plan_id}/dispatch", response_model=list[TaskRead], status_code=201)
+def dispatch_plan_endpoint(
+    plan_id: str,
+    request: PlanDispatchRequest,
+    response: Response,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> list[TaskRead]:
+    _access(db, request.tenant_id, current_user)
+    plan = plan_for_tenant(db, request.tenant_id, plan_id)
+    was_dispatched = plan.status == "dispatched"
+    rows = dispatch_plan(
+        db,
+        plan_id,
+        request.variant_key,
+        request.idempotency_key,
+        current_user,
+    )
+    if was_dispatched:
+        response.status_code = 200
+    return [_task_response(db, row) for row in rows]
 
 
 @router.post("/tasks", response_model=TaskRead, status_code=201)

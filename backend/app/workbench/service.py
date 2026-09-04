@@ -4,7 +4,9 @@ from collections.abc import Iterable
 from typing import Any
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.db.models import (
@@ -20,6 +22,12 @@ from app.db.models import (
     utc_now,
 )
 from app.workbench.permissions import WorkbenchAccess, employee_for_user
+from app.workbench.planner import (
+    PlanVariant,
+    build_variants,
+    generate_wbs,
+    validate_planning_tasks,
+)
 
 WORK_TASK_TRANSITIONS: dict[str, set[str]] = {
     "blocked": {"backlog", "canceled"},
@@ -132,6 +140,35 @@ def task_for_tenant(db: Session, tenant_id: str, task_id: str) -> WorkTask:
     if row is None or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Task not found")
     return row
+
+
+def plan_for_tenant(db: Session, tenant_id: str, plan_id: str) -> WorkPlan:
+    row = db.get(WorkPlan, plan_id)
+    if row is None or row.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return row
+
+
+def ensure_plan_visible(db: Session, plan: WorkPlan, actor_user_id: str) -> None:
+    access = WorkbenchAccess.for_user(db, plan.tenant_id, actor_user_id)
+    project = project_for_tenant(db, plan.tenant_id, plan.project_id)
+    if (
+        access.can_view_all
+        or plan.created_by_user_id == actor_user_id
+        or project.owner_user_id == actor_user_id
+        or _managed_project(access, project)
+    ):
+        return
+    assigned = db.exec(
+        select(WorkTask.id).where(
+            WorkTask.tenant_id == plan.tenant_id,
+            WorkTask.plan_id == plan.id,
+            (WorkTask.assignee_user_id == actor_user_id)
+            | (WorkTask.reviewer_user_id == actor_user_id),
+        )
+    ).first()
+    if not assigned:
+        raise HTTPException(status_code=403, detail="Cannot view this plan")
 
 
 def _event(
@@ -453,6 +490,213 @@ def create_task(
     db.commit()
     db.refresh(row)
     return row
+
+
+def build_plan(db: Session, request: Any, current_user: User) -> WorkPlan:
+    tenant_id = request.tenant_id
+    project = project_for_tenant(db, tenant_id, request.project_id)
+    access = WorkbenchAccess.for_user(db, tenant_id, current_user.id)
+    _ensure_project_manager(access, project)
+
+    goal = (request.goal or project.objective).strip()
+    deadline = request.deadline or project.due_date
+    budget = request.budget if request.budget is not None else project.budget
+    constraints = dict(request.constraints or {})
+    generated = generate_wbs(db, tenant_id, goal, constraints)
+    employees = list(
+        db.exec(
+            select(EmployeeProfile).where(
+                EmployeeProfile.tenant_id == tenant_id,
+                EmployeeProfile.status == "active",
+                EmployeeProfile.department_id == project.department_id,
+            )
+        ).all()
+    )
+    current_work = list(
+        db.exec(
+            select(WorkTask).where(
+                WorkTask.tenant_id == tenant_id,
+                WorkTask.status.in_(("blocked", "backlog", "in_progress", "review")),
+            )
+        ).all()
+    )
+    today = utc_now().date()
+    start_date = max(today, project.start_date) if project.start_date else today
+    variants = build_variants(
+        generated.tasks,
+        employees,
+        current_work,
+        project_id=project.id,
+        start_date=start_date,
+        deadline=deadline,
+        budget=budget,
+    )
+    plan = WorkPlan(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        created_by_user_id=current_user.id,
+        goal=goal,
+        deadline=deadline,
+        budget=budget,
+        constraints_json=constraints,
+        status="draft",
+        source=generated.source,
+        variants_json=[variant.model_dump(mode="json") for variant in variants],
+    )
+    try:
+        db.add(plan)
+        db.commit()
+        db.refresh(plan)
+        return plan
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _tasks_for_plan(db: Session, plan: WorkPlan) -> list[WorkTask]:
+    return list(
+        db.exec(
+            select(WorkTask)
+            .where(
+                WorkTask.tenant_id == plan.tenant_id,
+                WorkTask.plan_id == plan.id,
+            )
+            .order_by(WorkTask.created_at, WorkTask.id)
+        ).all()
+    )
+
+
+def dispatch_plan(
+    db: Session,
+    plan_id: str,
+    variant_key: str,
+    idempotency_key: str,
+    current_user: User,
+) -> list[WorkTask]:
+    plan = plan_for_tenant(db, current_user.tenant_id, plan_id)
+    project = project_for_tenant(db, plan.tenant_id, plan.project_id)
+    access = WorkbenchAccess.for_user(db, plan.tenant_id, current_user.id)
+    _ensure_project_manager(access, project)
+
+    if plan.status == "dispatched":
+        if plan.dispatch_idempotency_key == idempotency_key:
+            return _tasks_for_plan(db, plan)
+        raise HTTPException(status_code=409, detail="Plan was already dispatched")
+    if plan.status != "draft":
+        raise HTTPException(status_code=409, detail="Plan is not dispatchable")
+    collision = db.exec(
+        select(WorkPlan.id).where(
+            WorkPlan.tenant_id == plan.tenant_id,
+            WorkPlan.dispatch_idempotency_key == idempotency_key,
+            WorkPlan.id != plan.id,
+        )
+    ).first()
+    if collision:
+        raise HTTPException(status_code=409, detail="Idempotency key is already in use")
+
+    try:
+        variant = PlanVariant.model_validate(
+            next(item for item in plan.variants_json if item.get("key") == variant_key)
+        )
+    except (StopIteration, ValidationError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Plan variant is invalid") from exc
+    task_keys = {task.key for task in variant.tasks}
+    if len(task_keys) != len(variant.tasks) or any(
+        dependency not in task_keys for task in variant.tasks for dependency in task.depends_on
+    ):
+        raise HTTPException(status_code=422, detail="Plan variant dependencies are invalid")
+    try:
+        validate_planning_tasks(variant.tasks)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Plan variant dependencies are invalid") from exc
+
+    now = utc_now()
+    try:
+        claim = db.exec(
+            sa_update(WorkPlan)
+            .where(
+                WorkPlan.id == plan.id,
+                WorkPlan.tenant_id == plan.tenant_id,
+                WorkPlan.status == "draft",
+                WorkPlan.dispatch_idempotency_key.is_(None),
+            )
+            .values(
+                status="approved",
+                selected_variant=variant_key,
+                dispatch_idempotency_key=idempotency_key,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if claim.rowcount != 1:
+            db.rollback()
+            latest = plan_for_tenant(db, current_user.tenant_id, plan_id)
+            if latest.status == "dispatched" and latest.dispatch_idempotency_key == idempotency_key:
+                return _tasks_for_plan(db, latest)
+            raise HTTPException(status_code=409, detail="Plan dispatch conflict")
+        plan.status = "approved"
+        plan.selected_variant = variant_key
+        plan.dispatch_idempotency_key = idempotency_key
+        plan.updated_at = now
+
+        _claim_project_version(db, project, project.version)
+        tasks_by_key: dict[str, WorkTask] = {}
+        for planned in variant.tasks:
+            row = WorkTask(
+                tenant_id=plan.tenant_id,
+                project_id=plan.project_id,
+                plan_id=plan.id,
+                title=planned.title,
+                description=planned.description or None,
+                required_role=planned.required_role or None,
+                priority=planned.priority,
+                status="blocked" if planned.depends_on else "backlog",
+                assignee_user_id=planned.assignee_user_id,
+                start_date=planned.start_date,
+                due_date=planned.due_date,
+                estimate_days=planned.estimate_days,
+                acceptance_criteria=planned.acceptance_criteria or None,
+            )
+            db.add(row)
+            db.flush()
+            tasks_by_key[planned.key] = row
+            _event(db, row, "task_created", current_user.id, None, row.status)
+            if row.assignee_user_id:
+                _event(
+                    db,
+                    row,
+                    "task_assigned",
+                    current_user.id,
+                    row.status,
+                    row.status,
+                    {"assignee_user_id": row.assignee_user_id},
+                )
+        for planned in variant.tasks:
+            for dependency_key in planned.depends_on:
+                db.add(
+                    WorkTaskDependency(
+                        tenant_id=plan.tenant_id,
+                        task_id=tasks_by_key[planned.key].id,
+                        depends_on_task_id=tasks_by_key[dependency_key].id,
+                    )
+                )
+
+        plan.status = "dispatched"
+        plan.dispatched_at = now
+        plan.updated_at = now
+        db.add(plan)
+        db.commit()
+        db.expire_all()
+        return _tasks_for_plan(db, plan_for_tenant(db, current_user.tenant_id, plan_id))
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Plan dispatch conflict") from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 def _claim_version(db: Session, task: WorkTask, version: int) -> None:
