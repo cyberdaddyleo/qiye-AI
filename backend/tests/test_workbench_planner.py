@@ -37,6 +37,13 @@ def _valid_wbs() -> dict[str, object]:
     return {"tasks": tasks}
 
 
+def _numeric_dependency_wbs() -> dict[str, object]:
+    tasks = [dict(task) for task in _valid_wbs()["tasks"]]
+    tasks[0]["key"] = "1"
+    tasks[1]["depends_on"] = [1]
+    return {"tasks": tasks}
+
+
 class _FakeLLMClient:
     response: object = _valid_wbs()
     calls: ClassVar[list[dict[str, object]]] = []
@@ -125,6 +132,28 @@ def test_generate_wbs_normalizes_valid_model_output_and_caps_inputs(db: Session)
                 *list(_valid_wbs()["tasks"])[1:],
             ]
         },
+        {
+            "tasks": [
+                *list(_valid_wbs()["tasks"])[:1],
+                {**list(_valid_wbs()["tasks"])[1], "depends_on": "T1"},
+                *list(_valid_wbs()["tasks"])[2:],
+            ]
+        },
+        {
+            "tasks": [
+                *list(_valid_wbs()["tasks"])[:1],
+                {**list(_valid_wbs()["tasks"])[1], "depends_on": None},
+                *list(_valid_wbs()["tasks"])[2:],
+            ]
+        },
+        _numeric_dependency_wbs(),
+        {
+            "tasks": [
+                *list(_valid_wbs()["tasks"])[:1],
+                {**list(_valid_wbs()["tasks"])[1], "depends_on": [""]},
+                *list(_valid_wbs()["tasks"])[2:],
+            ]
+        },
         TimeoutError("provider secret sk-timeout"),
     ],
     ids=[
@@ -135,6 +164,10 @@ def test_generate_wbs_normalizes_valid_model_output_and_caps_inputs(db: Session)
         "cycle",
         "unexpected-secret-field",
         "model-controlled-assignment",
+        "dependency-string-not-list",
+        "dependency-null",
+        "dependency-number",
+        "dependency-empty-string",
         "provider-timeout",
     ],
 )
@@ -189,7 +222,7 @@ def _planning_tasks() -> list[PlanningTask]:
             title="Build API",
             required_role="Engineer",
             skills=["PYTHON，FASTAPI"],
-            estimate_days=5,
+            estimate_days=6,
             priority="high",
             depends_on=["research"],
             acceptance_criteria="API tests pass",
@@ -291,7 +324,7 @@ def test_matching_scheduling_and_three_variants_are_explainable_and_distinct() -
     assert tasks["qa"].start_date > max(tasks["api"].due_date, tasks["design"].due_date)
     assert by_key["A"].metrics["critical_path"] == ["research", "api", "qa", "analysis"]
     assert by_key["A"].metrics["peak_parallelism"] >= 2
-    assert by_key["A"].utilization["expert"]["assigned_days"] == 5.0
+    assert by_key["A"].utilization["expert"]["assigned_days"] == 6.0
 
 
 def test_overloaded_employee_loses_capacity_score() -> None:
@@ -333,3 +366,173 @@ def test_overloaded_employee_loses_capacity_score() -> None:
     assert balanced.tasks[0].assignee_user_id == "free"
     assert assignment["score_components"]["capacity"] == 16.0
     assert assignment["candidate_scores"]["busy"]["capacity"] == 0.0
+
+
+def test_cost_variant_does_not_match_go_inside_django() -> None:
+    employees = [
+        _employee("go", "Backend Engineer", ["Go"], 100, 500),
+        _employee("django", "Backend Engineer", ["Django"], 100, 10),
+    ]
+    task = PlanningTask(
+        key="service",
+        title="Build service",
+        required_role="Engineer",
+        skills=["go"],
+        estimate_days=2,
+        acceptance_criteria="Done",
+    )
+
+    cost = build_variants(
+        [task], employees, [], project_id="new", start_date=date(2026, 9, 7)
+    )[2]
+
+    assert cost.tasks[0].assignee_user_id == "go"
+
+
+def test_cost_variant_does_not_match_sql_inside_nosql() -> None:
+    employee = _employee("nosql", "Data Engineer", ["NoSQL"], 100, 10)
+    task = PlanningTask(
+        key="warehouse",
+        title="Build warehouse",
+        required_role="Engineer",
+        skills=["sql"],
+        estimate_days=2,
+        acceptance_criteria="Done",
+    )
+
+    cost = build_variants(
+        [task], [employee], [], project_id="new", start_date=date(2026, 9, 7)
+    )[2]
+
+    assert cost.tasks[0].assignee_user_id is None
+    assert cost.tasks[0].unassigned_reason == "没有满足角色与技能要求的可用员工"
+
+
+def test_cost_variant_allows_cjk_skill_substring_matching() -> None:
+    employee = _employee("analyst", "Data Engineer", ["数据分析"], 100, 100)
+    task = PlanningTask(
+        key="insight",
+        title="Analyze data",
+        required_role="Engineer",
+        skills=["分析"],
+        estimate_days=2,
+        acceptance_criteria="Done",
+    )
+
+    cost = build_variants(
+        [task], [employee], [], project_id="new", start_date=date(2026, 9, 7)
+    )[2]
+
+    assert cost.tasks[0].assignee_user_id == "analyst"
+
+
+def test_fast_variant_scales_configured_capacity_by_twenty_percent() -> None:
+    employee = _employee("part_time", "Backend Engineer", ["Python"], 60, 500)
+    task = PlanningTask(
+        key="api",
+        title="Build API",
+        required_role="Engineer",
+        skills=["python"],
+        estimate_days=6,
+        acceptance_criteria="Done",
+    )
+
+    fast = build_variants(
+        [task], [employee], [], project_id="new", start_date=date(2026, 9, 7)
+    )[1]
+
+    assert fast.tasks[0].assignment["effective_capacity_percent"] == 72.0
+    assert fast.tasks[0].start_date == date(2026, 9, 7)
+    assert fast.tasks[0].due_date == date(2026, 9, 17)
+    assert fast.metrics["duration_workdays"] == 9
+    assert any("60%→72%" in risk for risk in fast.risks)
+
+
+def test_existing_unscheduled_work_accumulates_after_latest_committed_date() -> None:
+    employee = _employee("engineer", "Backend Engineer", ["Python"], 100, 500)
+    current_work = [
+        WorkTask(
+            tenant_id="tenant_a",
+            project_id="old",
+            title="Committed",
+            assignee_user_id="engineer",
+            status="in_progress",
+            estimate_days=4,
+            due_date=date(2026, 9, 18),
+        ),
+        WorkTask(
+            tenant_id="tenant_a",
+            project_id="old",
+            title="Unscheduled one",
+            assignee_user_id="engineer",
+            status="backlog",
+            estimate_days=10,
+        ),
+        WorkTask(
+            tenant_id="tenant_a",
+            project_id="old",
+            title="Unscheduled two",
+            assignee_user_id="engineer",
+            status="backlog",
+            estimate_days=10,
+        ),
+    ]
+    task = PlanningTask(
+        key="next",
+        title="Next work",
+        required_role="Engineer",
+        skills=["python"],
+        estimate_days=1,
+        acceptance_criteria="Done",
+    )
+
+    balanced = build_variants(
+        [task], current_work=current_work, employees=[employee],
+        project_id="new", start_date=date(2026, 9, 7)
+    )[0]
+
+    assert balanced.tasks[0].start_date == date(2026, 10, 19)
+
+
+def test_critical_path_uses_capacity_resource_serialization_and_availability_waits() -> None:
+    employees = [
+        _employee("designer", "Product Designer", ["Figma"], 25, 400),
+        _employee("engineer", "Backend Engineer", ["Python"], 100, 400),
+    ]
+    current_work = [
+        WorkTask(
+            tenant_id="tenant_a",
+            project_id="old",
+            title="Committed design",
+            assignee_user_id="designer",
+            status="in_progress",
+            estimate_days=5,
+            due_date=date(2026, 9, 11),
+        )
+    ]
+    tasks = [
+        PlanningTask(
+            key="slow_a", title="Slow A", required_role="Designer", skills=["figma"],
+            estimate_days=3, acceptance_criteria="Done"
+        ),
+        PlanningTask(
+            key="slow_b", title="Slow B", required_role="Designer", skills=["figma"],
+            estimate_days=3, acceptance_criteria="Done"
+        ),
+        PlanningTask(
+            key="fast_a", title="Fast A", required_role="Engineer", skills=["python"],
+            estimate_days=8, acceptance_criteria="Done"
+        ),
+        PlanningTask(
+            key="fast_b", title="Fast B", required_role="Engineer", skills=["python"],
+            estimate_days=8, depends_on=["fast_a"], acceptance_criteria="Done"
+        ),
+    ]
+
+    balanced = build_variants(
+        tasks, employees, current_work, project_id="new", start_date=date(2026, 9, 7)
+    )[0]
+
+    assert balanced.metrics["critical_path"] == ["slow_a", "slow_b"]
+    assert balanced.tasks[0].start_date == date(2026, 9, 14)
+    assert balanced.tasks[1].start_date > balanced.tasks[0].due_date

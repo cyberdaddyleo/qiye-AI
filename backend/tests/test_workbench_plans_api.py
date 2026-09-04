@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.api import workbench as workbench_api
 from app.db import get_session
 from app.db.models import (
     Department,
@@ -270,3 +271,31 @@ def test_dispatch_rolls_back_all_side_effects_on_mid_transaction_failure(
         plan = db.get(WorkPlan, preview["id"])
         assert plan.status == "draft"
         assert plan.dispatch_idempotency_key is None
+
+
+def test_dispatch_race_replay_returns_http_200(
+    workbench: tuple[TestClient, object, dict[str, User], WorkProject],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, users, project = workbench
+    preview = _preview(client, users["manager"], project)
+
+    class ExistingDispatch(list[WorkTask]):
+        created = False
+
+    monkeypatch.setattr(
+        workbench_api,
+        "dispatch_plan",
+        lambda *args, **kwargs: ExistingDispatch(),
+    )
+    response = client.post(
+        f"/api/enterprise/workbench/plans/{preview['id']}/dispatch",
+        headers=_headers(users["manager"]),
+        json={
+            "tenant_id": "tenant_a",
+            "variant_key": "A",
+            "idempotency_key": "same-key-race",
+        },
+    )
+
+    assert response.status_code == 200

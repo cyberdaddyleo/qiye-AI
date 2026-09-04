@@ -438,8 +438,7 @@ def dispatch_plan_endpoint(
     current_user: User = Depends(get_current_user),
 ) -> list[TaskRead]:
     _access(db, request.tenant_id, current_user)
-    plan = plan_for_tenant(db, request.tenant_id, plan_id)
-    was_dispatched = plan.status == "dispatched"
+    plan_for_tenant(db, request.tenant_id, plan_id)
     rows = dispatch_plan(
         db,
         plan_id,
@@ -447,7 +446,7 @@ def dispatch_plan_endpoint(
         request.idempotency_key,
         current_user,
     )
-    if was_dispatched:
+    if not getattr(rows, "created", False):
         response.status_code = 200
     return [_task_response(db, row) for row in rows]
 

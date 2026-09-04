@@ -566,6 +566,12 @@ def _tasks_for_plan(db: Session, plan: WorkPlan) -> list[WorkTask]:
     )
 
 
+class _DispatchTasks(list[WorkTask]):
+    def __init__(self, tasks: Iterable[WorkTask], *, created: bool) -> None:
+        super().__init__(tasks)
+        self.created = created
+
+
 def dispatch_plan(
     db: Session,
     plan_id: str,
@@ -580,7 +586,7 @@ def dispatch_plan(
 
     if plan.status == "dispatched":
         if plan.dispatch_idempotency_key == idempotency_key:
-            return _tasks_for_plan(db, plan)
+            return _DispatchTasks(_tasks_for_plan(db, plan), created=False)
         raise HTTPException(status_code=409, detail="Plan was already dispatched")
     if plan.status != "draft":
         raise HTTPException(status_code=409, detail="Plan is not dispatchable")
@@ -632,7 +638,7 @@ def dispatch_plan(
             db.rollback()
             latest = plan_for_tenant(db, current_user.tenant_id, plan_id)
             if latest.status == "dispatched" and latest.dispatch_idempotency_key == idempotency_key:
-                return _tasks_for_plan(db, latest)
+                return _DispatchTasks(_tasks_for_plan(db, latest), created=False)
             raise HTTPException(status_code=409, detail="Plan dispatch conflict")
         plan.status = "approved"
         plan.selected_variant = variant_key
@@ -687,7 +693,10 @@ def dispatch_plan(
         db.add(plan)
         db.commit()
         db.expire_all()
-        return _tasks_for_plan(db, plan_for_tenant(db, current_user.tenant_id, plan_id))
+        return _DispatchTasks(
+            _tasks_for_plan(db, plan_for_tenant(db, current_user.tenant_id, plan_id)),
+            created=True,
+        )
     except HTTPException:
         db.rollback()
         raise

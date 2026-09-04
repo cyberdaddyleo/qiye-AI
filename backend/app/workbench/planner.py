@@ -86,8 +86,18 @@ class PlanningTask(BaseModel):
     @field_validator("depends_on", mode="before")
     @classmethod
     def normalize_dependencies(cls, value: object) -> list[str]:
-        raw = value if isinstance(value, list) else []
-        return list(dict.fromkeys(_normalize_key(str(item or "")) for item in raw if item))
+        if not isinstance(value, list):
+            raise TypeError("depends_on must be a list")
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("dependency keys must be non-empty strings")
+            key = _normalize_key(item)
+            if not key:
+                raise ValueError("dependency key is invalid")
+            if key not in normalized:
+                normalized.append(key)
+        return normalized
 
 
 class PlanVariant(BaseModel):
@@ -278,19 +288,30 @@ def _employee_loads(current_work: list[WorkTask]) -> dict[str, float]:
 def _initial_availability(
     employees: list[EmployeeProfile], current_work: list[WorkTask], start_date: date
 ) -> dict[str, date]:
-    available = {employee.user_id: _next_workday(start_date) for employee in employees}
+    employee_by_user = {employee.user_id: employee for employee in employees}
+    latest_committed: dict[str, date] = {}
+    unscheduled_effort: dict[str, float] = defaultdict(float)
     for task in current_work:
         user_id = task.assignee_user_id
-        if not user_id or user_id not in available or task.status not in _ACTIVE_STATUSES:
+        if not user_id or user_id not in employee_by_user or task.status not in _ACTIVE_STATUSES:
             continue
         if task.due_date:
-            candidate = _after_workday(task.due_date)
+            latest_committed[user_id] = max(
+                latest_committed.get(user_id, task.due_date), task.due_date
+            )
         else:
-            employee = next(item for item in employees if item.user_id == user_id)
+            unscheduled_effort[user_id] += _remaining_days(task)
+    available: dict[str, date] = {}
+    for employee in employees:
+        base = _next_workday(start_date)
+        if employee.user_id in latest_committed:
+            base = max(base, _after_workday(latest_committed[employee.user_id]))
+        effort = unscheduled_effort.get(employee.user_id, 0.0)
+        if effort:
             capacity = max(0.01, employee.capacity_percent / 100)
-            duration = max(1, math.ceil(_remaining_days(task) / capacity))
-            candidate = _after_workday(_add_workdays(start_date, duration))
-        available[user_id] = max(available[user_id], candidate)
+            duration = max(1, math.ceil(effort / capacity))
+            base = _after_workday(_add_workdays(base, duration))
+        available[employee.user_id] = base
     return available
 
 
@@ -310,11 +331,24 @@ def _skill_fraction(required_skills: list[str], employee: EmployeeProfile) -> fl
     if not required_skills:
         return 1.0
     employee_skills = _normalize_keywords(employee.skills_json)
+    normalized_required = _normalize_keywords(required_skills)
     matched = sum(
-        any(required == actual or required in actual or actual in required for actual in employee_skills)
-        for required in _normalize_keywords(required_skills)
+        any(_skill_matches(required, actual) for actual in employee_skills)
+        for required in normalized_required
     )
-    return matched / len(_normalize_keywords(required_skills))
+    return matched / len(normalized_required)
+
+
+def _skill_matches(required: str, actual: str) -> bool:
+    if re.search(r"[\u3400-\u9fff]", required):
+        return required in actual
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(required)}(?![a-z0-9])",
+            actual,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _score_candidate(
@@ -343,27 +377,54 @@ def _score_candidate(
     return components, qualified
 
 
+def _effective_capacity_percent(employee: EmployeeProfile, strategy: str) -> float:
+    if strategy == "fast":
+        return round(min(120.0, employee.capacity_percent * 1.2), 2)
+    return float(employee.capacity_percent)
+
+
 def _task_duration(task: PlanningTask, employee: EmployeeProfile | None, strategy: str) -> int:
     if employee is None:
         return max(1, math.ceil(task.estimate_days))
-    if strategy == "fast":
-        return max(1, round(task.estimate_days / 1.2))
-    capacity = max(0.01, employee.capacity_percent / 100)
+    capacity = max(0.01, _effective_capacity_percent(employee, strategy) / 100)
     return max(1, math.ceil(task.estimate_days / capacity))
 
 
-def _critical_path(tasks: list[PlanningTask]) -> list[str]:
+def _critical_path(
+    tasks: list[PlanningTask], blockers: dict[str, list[str]], start_date: date
+) -> list[str]:
     by_key = {task.key: task for task in tasks}
-    best: dict[str, tuple[float, list[str]]] = {}
-    for key in _topological_order(tasks):
-        task = by_key[key]
-        previous = max(
-            (best[dependency] for dependency in task.depends_on),
-            default=(0.0, []),
-            key=lambda item: item[0],
-        )
-        best[key] = (previous[0] + task.estimate_days, [*previous[1], key])
-    return max(best.values(), key=lambda item: item[0])[1] if best else []
+    paths: dict[str, list[str]] = {}
+
+    def path_to(key: str) -> list[str]:
+        if key in paths:
+            return paths[key]
+        predecessors = blockers.get(key, [])
+        if not predecessors:
+            paths[key] = [key]
+        else:
+            predecessor = max(
+                predecessors,
+                key=lambda item: (
+                    by_key[item].due_date or start_date,
+                    len(path_to(item)),
+                    item,
+                ),
+            )
+            paths[key] = [*path_to(predecessor), key]
+        return paths[key]
+
+    if not tasks:
+        return []
+    terminal = max(
+        tasks,
+        key=lambda task: (
+            task.due_date or start_date,
+            _working_days_between(start_date, task.due_date or start_date),
+            task.key,
+        ),
+    )
+    return path_to(terminal.key)
 
 
 def _plan_variant(
@@ -384,13 +445,17 @@ def _plan_variant(
     finish_dates: dict[str, date] = {}
     assigned_effort: dict[str, float] = defaultdict(float)
     risks: list[str] = []
+    blocking_edges: dict[str, list[str]] = defaultdict(list)
+    previous_task_by_employee: dict[str, str] = {}
+    effective_capacities: dict[str, float] = {}
 
     for task_key in _topological_order(tasks):
         task = by_key[task_key]
-        dependency_start = max(
-            (_after_workday(finish_dates[dependency]) for dependency in task.depends_on),
-            default=_next_workday(start_date),
-        )
+        dependency_dates = {
+            dependency: _after_workday(finish_dates[dependency])
+            for dependency in task.depends_on
+        }
+        dependency_start = max(dependency_dates.values(), default=_next_workday(start_date))
         scored: list[tuple[EmployeeProfile, dict[str, float], float]] = []
         candidate_scores: dict[str, dict[str, float]] = {}
         for employee in employees:
@@ -436,13 +501,26 @@ def _plan_variant(
         task.assignee_user_id = selected.user_id if selected else None
         if selected:
             components = candidate_scores[selected.user_id]
-            task_start = max(dependency_start, available[selected.user_id])
+            resource_start = available[selected.user_id]
+            task_start = max(dependency_start, resource_start)
             task_due = _add_workdays(task_start, _task_duration(task, selected, strategy))
+            blocking_edges[task.key].extend(
+                dependency
+                for dependency, blocked_until in dependency_dates.items()
+                if blocked_until == task_start
+            )
+            previous_task = previous_task_by_employee.get(selected.user_id)
+            if previous_task and resource_start == task_start:
+                blocking_edges[task.key].append(previous_task)
+            previous_task_by_employee[selected.user_id] = task.key
             available[selected.user_id] = _after_workday(task_due)
             assigned_effort[selected.user_id] += task.estimate_days
+            effective_capacity = _effective_capacity_percent(selected, strategy)
+            effective_capacities[selected.user_id] = effective_capacity
             task.assignment = {
                 "score_components": components,
                 "total_score": round(sum(components.values()), 2),
+                "effective_capacity_percent": effective_capacity,
                 "candidate_scores": candidate_scores,
                 "rationale": (
                     f"角色匹配 {components['role']:.0f}/40；技能匹配 {components['skills']:.0f}/30；"
@@ -452,6 +530,11 @@ def _plan_variant(
         else:
             task_start = dependency_start
             task_due = _add_workdays(task_start, _task_duration(task, None, strategy))
+            blocking_edges[task.key].extend(
+                dependency
+                for dependency, blocked_until in dependency_dates.items()
+                if blocked_until == task_start
+            )
             task.unassigned_reason = "没有满足角色与技能要求的可用员工"
             task.assignment = {"candidate_scores": candidate_scores}
             risks.append(f"任务“{task.title}”未分配：{task.unassigned_reason}")
@@ -471,7 +554,13 @@ def _plan_variant(
         2,
     )
     if strategy == "fast":
-        risks.append("快速方案按最高 120% 容量排期，需关注人员过载")
+        for user_id, effective_capacity in effective_capacities.items():
+            configured = employees_by_user[user_id].capacity_percent
+            if effective_capacity > configured:
+                risks.append(
+                    f"快速方案将员工 {user_id} 容量由 {configured:g}%→"
+                    f"{effective_capacity:g}%，需关注过载"
+                )
     if deadline and finish > deadline:
         risks.append(f"计划完成日期 {finish.isoformat()} 晚于截止日期 {deadline.isoformat()}")
     if budget is not None and cost > budget:
@@ -511,8 +600,9 @@ def _plan_variant(
             "finish_date": finish.isoformat(),
             "duration_workdays": duration,
             "cost": cost,
-            "critical_path": _critical_path(tasks),
+            "critical_path": _critical_path(planned_tasks, blocking_edges, start_date),
             "peak_parallelism": peak_parallelism,
+            "effective_capacity_percent": effective_capacities,
         },
         risks=risks,
         utilization=utilization,
