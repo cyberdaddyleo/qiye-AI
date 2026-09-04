@@ -87,7 +87,11 @@ def test_workbench_models_round_trip_and_constraints(db: Session, user: User) ->
     )
     db.add_all([project, plan, task_one, task_two])
     db.flush()
-    dependency = WorkTaskDependency(task_id=task_two.id, depends_on_task_id=task_one.id)
+    dependency = WorkTaskDependency(
+        tenant_id=user.tenant_id,
+        task_id=task_two.id,
+        depends_on_task_id=task_one.id,
+    )
     event = WorkTaskEvent(
         tenant_id=user.tenant_id,
         task_id=task_one.id,
@@ -99,19 +103,46 @@ def test_workbench_models_round_trip_and_constraints(db: Session, user: User) ->
     db.add_all([dependency, event])
     db.commit()
 
-    assert project.status == "active"
-    assert plan.status == "draft"
-    assert task_one.status == "backlog"
-    assert task_one.progress == 0
-    assert task_one.version == 0
-    assert db.get(WorkPlan, plan.id).variants_json == [{"name": "稳健", "model_api_key": "secret"}]
-    assert db.get(WorkTaskEvent, event.id).payload_json == {"source": "test"}
+    project_id = project.id
+    plan_id = plan.id
+    task_one_id = task_one.id
+    dependency_id = dependency.id
+    event_id = event.id
+    db.expire_all()
+    assert db.get(WorkProject, project_id).status == "active"
+    assert db.get(WorkPlan, plan_id).status == "draft"
+    persisted_task = db.get(WorkTask, task_one_id)
+    assert persisted_task.status == "backlog"
+    assert persisted_task.progress == 0
+    assert persisted_task.version == 0
+    assert db.get(WorkPlan, plan_id).variants_json == [{"name": "稳健", "model_api_key": "secret"}]
+    assert db.get(WorkTaskEvent, event_id).payload_json == {"source": "test"}
+    assert db.get(WorkTaskDependency, dependency_id).tenant_id == user.tenant_id
 
     db.add(EmployeeProfile(tenant_id=user.tenant_id, user_id=user.id, business_role="member"))
     with pytest.raises(IntegrityError):
         db.commit()
     db.rollback()
-    db.add(WorkTaskDependency(task_id=task_two.id, depends_on_task_id=task_one.id))
+    db.add(
+        WorkTaskDependency(
+            tenant_id=user.tenant_id,
+            task_id=task_two.id,
+            depends_on_task_id=task_one.id,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.commit()
+
+
+def test_employee_capacity_has_database_invariant(db: Session, user: User) -> None:
+    db.add(
+        EmployeeProfile(
+            tenant_id=user.tenant_id,
+            user_id="user_invalid_capacity",
+            business_role="member",
+            capacity_percent=101,
+        )
+    )
     with pytest.raises(IntegrityError):
         db.commit()
 
@@ -130,7 +161,15 @@ def test_workbench_dtos_are_strict_and_normalize_plan_credentials() -> None:
         goal="交付",
         status="draft",
         source="model",
-        variants=[{"name": "稳健", "model_api_key": "secret"}],
+        variants=[
+            {
+                "name": "稳健",
+                "openai_api_key": "secret",
+                "authorization": "Bearer secret",
+                "assignment": {"access_token": "secret", "assignee": "lee"},
+                "tasks": [{"apiKey": "secret", "title": "建模"}],
+            }
+        ],
         selected_variant=None,
         dispatch_idempotency_key=None,
         created_at="2026-09-04T00:00:00",
@@ -149,6 +188,12 @@ def test_workbench_dtos_are_strict_and_normalize_plan_credentials() -> None:
         created_at="2026-09-04T00:00:00",
         updated_at="2026-09-04T00:00:00",
     )
-    assert plan.variants == [{"name": "稳健"}]
+    assert plan.variants == [
+        {
+            "name": "稳健",
+            "assignment": {"assignee": "lee"},
+            "tasks": [{"title": "建模"}],
+        }
+    ]
     assert task.dependencies == []
     assert task.events == []

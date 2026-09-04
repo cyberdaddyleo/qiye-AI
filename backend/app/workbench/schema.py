@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -212,5 +213,15 @@ def _without_model_credentials(value: Any) -> Any:
 
 
 def _is_model_credential_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
-    return normalized in {"api_key", "model_api_key", "token", "secret", "password", "credential"}
+    normalized = re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower().replace("-", "_")
+    credential_suffixes = ("_api_key", "_access_token", "_secret", "_password", "_credential")
+    direct_credential_keys = {
+        "api_key",
+        "access_token",
+        "authorization",
+        "token",
+        "secret",
+        "password",
+        "credential",
+    }
+    return normalized in direct_credential_keys or normalized.endswith(credential_suffixes)

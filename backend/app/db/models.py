@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Optional
 from uuid import uuid4
 
-from sqlalchemy import JSON, Column, Index, Integer, UniqueConstraint
+from sqlalchemy import JSON, CheckConstraint, Column, Index, Integer, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -1624,6 +1624,10 @@ class EmployeeProfile(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("tenant_id", "user_id", name="uq_workbench_employee_tenant_user"),
         Index("ix_workbench_employee_tenant_department", "tenant_id", "department_id"),
+        CheckConstraint(
+            "capacity_percent >= 0 AND capacity_percent <= 100",
+            name="ck_workbench_employee_capacity_percent",
+        ),
     )
 
     id: str = Field(default_factory=lambda: new_id("employee"), primary_key=True)
@@ -1727,6 +1731,7 @@ class WorkTaskDependency(SQLModel, table=True):
     )
 
     id: str = Field(default_factory=lambda: new_id("taskdep"), primary_key=True)
+    tenant_id: str = Field(index=True)
     task_id: str = Field(index=True)
     depends_on_task_id: str = Field(index=True)
     created_at: datetime = Field(default_factory=utc_now)
