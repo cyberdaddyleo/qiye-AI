@@ -29,15 +29,17 @@ class WorkbenchAccess:
             )
         ).first()
         can_view_all = is_admin_user(user) or bool(profile and profile.business_role == "ceo")
-        managed_ids = db.exec(
-            select(Department.id).where(
-                Department.tenant_id == tenant_id,
-                Department.status == "active",
-                Department.manager_user_id == user_id,
-            )
-        ).all()
-        if profile and profile.business_role == "manager" and profile.department_id:
-            managed_ids.append(profile.department_id)
+        managed_ids: list[str] = []
+        if profile and profile.business_role == "manager":
+            managed_ids = db.exec(
+                select(Department.id).where(
+                    Department.tenant_id == tenant_id,
+                    Department.status == "active",
+                    Department.manager_user_id == user_id,
+                )
+            ).all()
+            if profile.department_id:
+                managed_ids.append(profile.department_id)
         return cls(
             tenant_id=tenant_id,
             user_id=user_id,

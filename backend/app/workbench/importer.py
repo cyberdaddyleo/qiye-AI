@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import csv
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import PurePath
 from typing import Any
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,31 @@ class EmployeeImportRow:
     daily_cost: float | None = None
     manager_username: str | None = None
     assistant_agent_id: str | None = None
+    provided_fields: frozenset[str] = field(default_factory=frozenset)
+
+
+@dataclass(frozen=True)
+class EmployeeImportError:
+    row_number: int
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class EmployeeImportResult:
+    rows: list[EmployeeImportRow]
+    errors: list[EmployeeImportError]
+
+
+class EmployeeImportTooManyRows(ValueError):
+    pass
+
+
+class _RowValidationError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
 
 
 _HEADER_ALIASES = {
@@ -71,68 +98,98 @@ _REQUIRED_COLUMNS = {"username", "display_name", "department"}
 _SUPPORTED_ROLES = {"admin", "ceo", "manager", "member"}
 
 
-def parse_employee_upload(filename: str, content: bytes) -> list[EmployeeImportRow]:
+def parse_employee_upload(filename: str, content: bytes) -> EmployeeImportResult:
     suffix = PurePath(filename).suffix.lower()
     if suffix == ".csv":
-        raw_rows = list(csv.reader(StringIO(content.decode("utf-8-sig"))))
+        try:
+            raw_rows = csv.reader(StringIO(content.decode("utf-8-sig")))
+            header = next(raw_rows)
+        except (StopIteration, UnicodeDecodeError) as exc:
+            raise ValueError("upload is empty or unreadable") from exc
+        return _parse_rows(header, raw_rows)
     elif suffix == ".xlsx":
-        workbook = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
-        raw_rows = [list(row) for row in workbook.active.iter_rows(values_only=True)]
-        workbook.close()
+        try:
+            workbook = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
+            raw_rows = workbook.active.iter_rows(values_only=True)
+            header = next(raw_rows)
+            return _parse_rows(list(header), raw_rows)
+        except StopIteration as exc:
+            raise ValueError("upload is empty") from exc
+        except (BadZipFile, InvalidFileException, OSError, KeyError) as exc:
+            raise ValueError("upload is unreadable") from exc
+        finally:
+            if "workbook" in locals():
+                workbook.close()
     else:
         raise ValueError("only .csv and .xlsx files are supported")
-    if not raw_rows:
-        raise ValueError("upload is empty")
 
-    headers = _normalized_headers(raw_rows[0])
+def _parse_rows(raw_header: list[Any], raw_rows: Any) -> EmployeeImportResult:
+    headers = _normalized_headers(raw_header)
     missing = _REQUIRED_COLUMNS - set(headers.values())
     if missing:
         raise ValueError(f"missing required columns: {', '.join(sorted(missing))}")
 
     seen_usernames: set[str] = set()
-    result: list[EmployeeImportRow] = []
-    for row_number, raw_row in enumerate(raw_rows[1:], start=2):
+    rows: list[EmployeeImportRow] = []
+    errors: list[EmployeeImportError] = []
+    for data_index, raw_row in enumerate(raw_rows, start=1):
+        if data_index > 2_000:
+            raise EmployeeImportTooManyRows("too_many_rows")
+        row_number = data_index + 1
         values = {
             field: _text(raw_row[index]) if index < len(raw_row) else ""
             for index, field in headers.items()
         }
         if not any(values.values()):
             continue
-        username = values["username"]
-        if not username:
-            raise ValueError(f"row {row_number}: username is required")
-        if username in seen_usernames:
-            raise ValueError(f"row {row_number}: duplicate username: {username}")
-        seen_usernames.add(username)
-        if not values["display_name"]:
-            raise ValueError(f"row {row_number}: display_name is required")
-        if not values["department"]:
-            raise ValueError(f"row {row_number}: department is required")
-        capacity_percent = _integer(values.get("capacity_percent"), row_number, "capacity_percent")
-        if capacity_percent is not None and not 0 <= capacity_percent <= 100:
-            raise ValueError(f"row {row_number}: capacity_percent must be between 0 and 100")
-        daily_cost = _number(values.get("daily_cost"), row_number, "daily_cost")
-        business_role = values.get("business_role") or None
-        if business_role and business_role not in _SUPPORTED_ROLES:
-            raise ValueError(f"row {row_number}: business_role is invalid")
-        result.append(
-            EmployeeImportRow(
-                row_number=row_number,
-                username=username,
-                display_name=values["display_name"],
-                department=values["department"],
-                employee_no=values.get("employee_no") or None,
-                job_title=values.get("job_title") or None,
-                business_role=business_role,
-                level=values.get("level") or None,
-                skills=_skills(values.get("skills")),
-                capacity_percent=capacity_percent,
-                daily_cost=daily_cost,
-                manager_username=values.get("manager_username") or None,
-                assistant_agent_id=values.get("assistant_agent_id") or None,
-            )
-        )
-    return result
+        try:
+            row = _parse_row(row_number, values, frozenset(headers.values()), seen_usernames)
+        except _RowValidationError as exc:
+            errors.append(EmployeeImportError(row_number, exc.code, exc.message))
+        else:
+            seen_usernames.add(row.username)
+            rows.append(row)
+    return EmployeeImportResult(rows=rows, errors=errors)
+
+
+def _parse_row(
+    row_number: int,
+    values: dict[str, str],
+    provided_fields: frozenset[str],
+    seen_usernames: set[str],
+) -> EmployeeImportRow:
+    username = values["username"]
+    if not username:
+        raise _RowValidationError("missing_username", "username is required")
+    if username in seen_usernames:
+        raise _RowValidationError("duplicate_username", "duplicate username")
+    if not values["display_name"]:
+        raise _RowValidationError("missing_display_name", "display_name is required")
+    if not values["department"]:
+        raise _RowValidationError("missing_department", "department is required")
+    capacity_percent = _integer(values.get("capacity_percent"), "capacity_percent")
+    if capacity_percent is not None and not 0 <= capacity_percent <= 100:
+        raise _RowValidationError("invalid_capacity_percent", "capacity_percent must be between 0 and 100")
+    daily_cost = _number(values.get("daily_cost"), "daily_cost")
+    business_role = values.get("business_role") or None
+    if business_role and business_role not in _SUPPORTED_ROLES:
+        raise _RowValidationError("invalid_business_role", "business_role is invalid")
+    return EmployeeImportRow(
+        row_number=row_number,
+        username=username,
+        display_name=values["display_name"],
+        department=values["department"],
+        employee_no=values.get("employee_no") or None,
+        job_title=values.get("job_title") or None,
+        business_role=business_role,
+        level=values.get("level") or None,
+        skills=_skills(values.get("skills")) if "skills" in provided_fields else None,
+        capacity_percent=capacity_percent,
+        daily_cost=daily_cost,
+        manager_username=values.get("manager_username") or None,
+        assistant_agent_id=values.get("assistant_agent_id") or None,
+        provided_fields=provided_fields,
+    )
 
 
 def _normalized_headers(raw_headers: list[Any]) -> dict[int, str]:
@@ -162,25 +219,25 @@ def _skills(value: str | None) -> list[str]:
     return list(dict.fromkeys(part.strip() for part in re.split(r"[,，;；、\n]+", value) if part.strip()))
 
 
-def _integer(value: str | None, row_number: int, field: str) -> int | None:
+def _integer(value: str | None, field: str) -> int | None:
     if not value:
         return None
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise ValueError(f"row {row_number}: {field} is invalid") from exc
+        raise _RowValidationError(f"invalid_{field}", f"{field} is invalid") from exc
     if not parsed.is_integer():
-        raise ValueError(f"row {row_number}: {field} is invalid")
+        raise _RowValidationError(f"invalid_{field}", f"{field} is invalid")
     return int(parsed)
 
 
-def _number(value: str | None, row_number: int, field: str) -> float | None:
+def _number(value: str | None, field: str) -> float | None:
     if not value:
         return None
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise ValueError(f"row {row_number}: {field} is invalid") from exc
+        raise _RowValidationError(f"invalid_{field}", f"{field} is invalid") from exc
     if parsed < 0:
-        raise ValueError(f"row {row_number}: {field} must be non-negative")
+        raise _RowValidationError(f"invalid_{field}", f"{field} must be non-negative")
     return parsed

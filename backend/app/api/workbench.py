@@ -12,10 +12,14 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.db import get_session
-from app.db.models import Department, EmployeeProfile, User, UserAvatar, utc_now
+from app.db.models import AgentProfile, Department, EmployeeProfile, User, UserAvatar, utc_now
 from app.security.auth import ensure_current_user_tenant, get_current_user, hash_password
 from app.security.tenant import ensure_tenant
-from app.workbench.importer import EmployeeImportRow, parse_employee_upload
+from app.workbench.importer import (
+    EmployeeImportRow,
+    EmployeeImportTooManyRows,
+    parse_employee_upload,
+)
 from app.workbench.permissions import (
     WorkbenchAccess,
     can_manage_employee,
@@ -162,6 +166,11 @@ def _ensure_department_manage(access: WorkbenchAccess, department_id: str | None
         raise HTTPException(status_code=403, detail="Cannot manage this department")
 
 
+def _ensure_global_role_assignment(access: WorkbenchAccess, business_role: str | None) -> None:
+    if business_role in {"admin", "ceo"} and not access.can_view_all:
+        raise HTTPException(status_code=403, detail="Only administrator or CEO can grant global employee roles")
+
+
 @router.post("/departments", response_model=DepartmentResponse, status_code=201)
 def create_department_endpoint(
     request: DepartmentCreate, db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
@@ -245,6 +254,7 @@ def create_employee_endpoint(
 ) -> EmployeeResponse:
     access = _access(db, request.tenant_id, current_user)
     _ensure_department_manage(access, request.department_id)
+    _ensure_global_role_assignment(access, request.business_role)
     values = request.model_dump(exclude={"tenant_id", "skills"})
     values["skills_json"] = request.skills
     row = create_employee(db, request.tenant_id, values)
@@ -314,6 +324,9 @@ def update_employee_endpoint(
     row = employee_for_tenant(db, request.tenant_id, employee_id)
     if not can_manage_employee(db, request.tenant_id, current_user.id, row):
         raise HTTPException(status_code=403, detail="Cannot manage this employee")
+    _ensure_global_role_assignment(
+        WorkbenchAccess.for_user(db, request.tenant_id, current_user.id), request.business_role
+    )
     values = request.model_dump(exclude_unset=True, exclude={"tenant_id", "skills"})
     if request.skills is not None:
         values["skills_json"] = request.skills
@@ -347,15 +360,19 @@ async def import_employees(
     if len(content) > MAX_IMPORT_BYTES:
         raise HTTPException(status_code=413, detail="Import file exceeds 5 MiB")
     try:
-        rows = parse_employee_upload(file.filename or "", content)
+        parsed = parse_employee_upload(file.filename or "", content)
+    except EmployeeImportTooManyRows as exc:
+        raise HTTPException(status_code=413, detail="Import contains more than 2,000 rows") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if len(rows) > MAX_IMPORT_ROWS:
-        raise HTTPException(status_code=413, detail="Import contains more than 2,000 rows")
+    rows = parsed.rows
 
     created = 0
     updated = 0
-    errors: list[dict[str, object]] = []
+    errors: list[dict[str, object]] = [
+        {"row": error.row_number, "code": error.code, "message": error.message}
+        for error in parsed.errors
+    ]
     results: list[dict[str, object]] = []
     for row in rows:
         error = _import_row_error(db, tenant_id, row)
@@ -437,21 +454,30 @@ def _import_row_error(
         return {"code": "unknown_department", "message": "部门不存在"}
     if row.manager_username and _user_by_username(db, tenant_id, row.manager_username) is None:
         return {"code": "unknown_manager", "message": "负责人账号不存在"}
+    if row.assistant_agent_id:
+        assistant = db.get(AgentProfile, row.assistant_agent_id)
+        if assistant is None or assistant.tenant_id != tenant_id:
+            return {"code": "unknown_assistant_agent", "message": "助理智能体不存在"}
     return None
 
 
 def _import_profile_values(
     row: EmployeeImportRow, department_id: str, manager_user_id: str | None
 ) -> dict[str, object]:
-    return {
+    values: dict[str, object] = {"department_id": department_id}
+    optional_values = {
         "employee_no": row.employee_no,
-        "department_id": department_id,
         "job_title": row.job_title,
-        "business_role": row.business_role or "member",
+        "business_role": row.business_role,
         "level": row.level,
-        "skills_json": row.skills or [],
-        "capacity_percent": row.capacity_percent if row.capacity_percent is not None else 100,
+        "skills_json": row.skills,
+        "capacity_percent": row.capacity_percent,
         "daily_cost": row.daily_cost,
         "manager_user_id": manager_user_id,
         "assistant_agent_id": row.assistant_agent_id,
     }
+    for field, value in optional_values.items():
+        input_field = "skills" if field == "skills_json" else field
+        if input_field in row.provided_fields and value is not None:
+            values[field] = value
+    return values

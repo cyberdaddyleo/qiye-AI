@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from app.db.models import Department, EmployeeProfile, User, WorkTask, utc_now
+from app.db.models import AgentProfile, Department, EmployeeProfile, User, WorkTask, utc_now
 
 
 def department_for_tenant(db: Session, tenant_id: str, department_id: str) -> Department:
@@ -29,6 +29,13 @@ def user_for_tenant(db: Session, tenant_id: str, user_id: str) -> User:
     return row
 
 
+def agent_for_tenant(db: Session, tenant_id: str, agent_id: str) -> AgentProfile:
+    row = db.get(AgentProfile, agent_id)
+    if row is None or row.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Assistant agent not found")
+    return row
+
+
 def validate_employee_values(db: Session, tenant_id: str, values: dict[str, Any]) -> None:
     department_id = values.get("department_id")
     if department_id:
@@ -36,6 +43,8 @@ def validate_employee_values(db: Session, tenant_id: str, values: dict[str, Any]
     for key in ("manager_user_id",):
         if values.get(key):
             user_for_tenant(db, tenant_id, values[key])
+    if values.get("assistant_agent_id"):
+        agent_for_tenant(db, tenant_id, values["assistant_agent_id"])
 
 
 def create_employee(db: Session, tenant_id: str, values: dict[str, Any]) -> EmployeeProfile:
