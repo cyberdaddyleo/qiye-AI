@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+from datetime import date
+
+import pytest
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, SQLModel, create_engine
+
+from app.db.models import (
+    Department,
+    EmployeeProfile,
+    User,
+    WorkPlan,
+    WorkProject,
+    WorkTask,
+    WorkTaskDependency,
+    WorkTaskEvent,
+)
+from app.workbench.schema import PlanPreviewRequest, PlanRead, TaskRead, TaskUpdateRequest
+
+
+@pytest.fixture
+def db() -> Session:
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        yield session
+
+
+@pytest.fixture
+def user(db: Session) -> User:
+    row = User(tenant_id="tenant_1", username="lee", password_hash="hashed")
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def test_workbench_models_round_trip_and_constraints(db: Session, user: User) -> None:
+    dept = Department(tenant_id=user.tenant_id, name="技术部", code="TECH")
+    db.add(dept)
+    db.flush()
+    employee = EmployeeProfile(
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        department_id=dept.id,
+        job_title="后端工程师",
+        business_role="member",
+        skills_json=["Python", "FastAPI"],
+    )
+    db.add(employee)
+    db.commit()
+    assert employee.status == "active"
+    assert employee.skills_json == ["Python", "FastAPI"]
+
+    project = WorkProject(
+        tenant_id=user.tenant_id,
+        name="企业工作台",
+        objective="交付首版",
+        owner_user_id=user.id,
+        department_id=dept.id,
+        budget=1000.0,
+        start_date=date(2026, 9, 1),
+    )
+    plan = WorkPlan(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        created_by_user_id=user.id,
+        goal="交付",
+        constraints_json={"deadline": "2026-09-30"},
+        variants_json=[{"name": "稳健", "model_api_key": "secret"}],
+    )
+    task_one = WorkTask(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        plan_id=plan.id,
+        title="建模",
+        required_role="engineer",
+    )
+    task_two = WorkTask(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        plan_id=plan.id,
+        title="开发",
+        required_role="engineer",
+    )
+    db.add_all([project, plan, task_one, task_two])
+    db.flush()
+    dependency = WorkTaskDependency(task_id=task_two.id, depends_on_task_id=task_one.id)
+    event = WorkTaskEvent(
+        tenant_id=user.tenant_id,
+        task_id=task_one.id,
+        actor_user_id=user.id,
+        actor_type="user",
+        event_type="created",
+        payload_json={"source": "test"},
+    )
+    db.add_all([dependency, event])
+    db.commit()
+
+    assert project.status == "active"
+    assert plan.status == "draft"
+    assert task_one.status == "backlog"
+    assert task_one.progress == 0
+    assert task_one.version == 0
+    assert db.get(WorkPlan, plan.id).variants_json == [{"name": "稳健", "model_api_key": "secret"}]
+    assert db.get(WorkTaskEvent, event.id).payload_json == {"source": "test"}
+
+    db.add(EmployeeProfile(tenant_id=user.tenant_id, user_id=user.id, business_role="member"))
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+    db.add(WorkTaskDependency(task_id=task_two.id, depends_on_task_id=task_one.id))
+    with pytest.raises(IntegrityError):
+        db.commit()
+
+
+def test_workbench_dtos_are_strict_and_normalize_plan_credentials() -> None:
+    with pytest.raises(ValidationError):
+        PlanPreviewRequest(tenant_id="tenant_1", project_id="project_1", unexpected=True)
+    with pytest.raises(ValidationError):
+        TaskUpdateRequest(tenant_id="tenant_1", unexpected=True)
+
+    plan = PlanRead(
+        id="plan_1",
+        tenant_id="tenant_1",
+        project_id="project_1",
+        created_by_user_id="user_1",
+        goal="交付",
+        status="draft",
+        source="model",
+        variants=[{"name": "稳健", "model_api_key": "secret"}],
+        selected_variant=None,
+        dispatch_idempotency_key=None,
+        created_at="2026-09-04T00:00:00",
+        updated_at="2026-09-04T00:00:00",
+    )
+    task = TaskRead(
+        id="task_1",
+        tenant_id="tenant_1",
+        project_id="project_1",
+        plan_id="plan_1",
+        title="开发",
+        priority="normal",
+        status="backlog",
+        progress=0,
+        version=0,
+        created_at="2026-09-04T00:00:00",
+        updated_at="2026-09-04T00:00:00",
+    )
+    assert plan.variants == [{"name": "稳健"}]
+    assert task.dependencies == []
+    assert task.events == []
