@@ -33,7 +33,7 @@ export default function WorkbenchLayout({
             )}
           </div>
         )}
-        right={actions}
+        actions={actions}
       />
       {children && <div className="pt-[24px]">{children}</div>}
     </main>
