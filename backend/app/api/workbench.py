@@ -16,6 +16,7 @@ from app.db.models import AgentProfile, Department, EmployeeProfile, User, UserA
 from app.security.auth import ensure_current_user_tenant, get_current_user, hash_password
 from app.security.tenant import ensure_tenant
 from app.workbench.importer import (
+    EmployeeImportArchiveLimit,
     EmployeeImportRow,
     EmployeeImportTooManyRows,
     parse_employee_upload,
@@ -361,6 +362,8 @@ async def import_employees(
         raise HTTPException(status_code=413, detail="Import file exceeds 5 MiB")
     try:
         parsed = parse_employee_upload(file.filename or "", content)
+    except EmployeeImportArchiveLimit as exc:
+        raise HTTPException(status_code=413, detail="XLSX archive exceeds import safety limits") from exc
     except EmployeeImportTooManyRows as exc:
         raise HTTPException(status_code=413, detail="Import contains more than 2,000 rows") from exc
     except ValueError as exc:

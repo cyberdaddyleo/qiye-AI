@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -86,6 +87,24 @@ def test_parse_employee_xlsx_stops_at_2001_rows() -> None:
 def test_parse_employee_upload_rejects_unreadable_xlsx() -> None:
     with pytest.raises(ValueError, match="unreadable"):
         parse_employee_upload("employees.xlsx", b"not an xlsx file")
+
+
+@pytest.mark.parametrize("kind", ["declared_size", "entry_count"])
+def test_parse_employee_upload_rejects_bounded_xlsx_archives(kind: str) -> None:
+    archive = BytesIO()
+    with ZipFile(archive, "w") as zip_file:
+        if kind == "entry_count":
+            for number in range(513):
+                zip_file.writestr(f"entry-{number}", b"")
+        else:
+            zip_file.writestr("small.txt", b"x")
+    content = bytearray(archive.getvalue())
+    if kind == "declared_size":
+        central_offset = content.index(b"PK\x01\x02")
+        content[central_offset + 24 : central_offset + 28] = (50 * 1024 * 1024 + 1).to_bytes(4, "little")
+
+    with pytest.raises(ValueError, match="xlsx_archive_limit"):
+        parse_employee_upload("employees.xlsx", bytes(content))
 
 
 def test_parse_employee_upload_accepts_2000_rows() -> None:
@@ -197,5 +216,72 @@ def test_employee_import_rejects_more_than_five_mebibytes() -> None:
             files={"file": ("employees.csv", b"x" * (5 * 1024 * 1024 + 1), "text/csv")},
         )
         assert response.status_code == 413
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_employee_import_preserves_existing_profile_when_optional_headers_are_absent() -> None:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as db:
+        admin = User(tenant_id="tenant_a", username="admin", role="admin", password_hash="hash")
+        employee = User(tenant_id="tenant_a", username="existing", password_hash="hash")
+        manager = User(tenant_id="tenant_a", username="manager", password_hash="hash")
+        department = Department(tenant_id="tenant_a", name="研发", code="DEV")
+        agent = AgentProfile(tenant_id="tenant_a", name="assistant")
+        db.add_all([Tenant(id="tenant_a", name="A"), admin, employee, manager, department, agent])
+        db.flush()
+        db.add(
+            EmployeeProfile(
+                tenant_id="tenant_a",
+                user_id=employee.id,
+                employee_no="E-01",
+                department_id=department.id,
+                job_title="工程师",
+                business_role="manager",
+                level="P7",
+                skills_json=["Python", "SQL"],
+                capacity_percent=65,
+                daily_cost=1234.5,
+                manager_user_id=manager.id,
+                assistant_agent_id=agent.id,
+            )
+        )
+        db.commit()
+        token = create_access_token(admin)
+        employee_id = employee.id
+
+    def override_get_session():
+        with Session(engine) as db:
+            yield db
+
+    app.dependency_overrides[get_session] = override_get_session
+    try:
+        response = TestClient(app).post(
+            "/api/enterprise/workbench/employees/import",
+            params={"tenant_id": "tenant_a"},
+            headers={"Authorization": f"Bearer {token}"},
+            files={
+                "file": (
+                    "employees.csv",
+                    "username,display_name,department\nexisting,改名,研发\n".encode(),
+                    "text/csv",
+                )
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["created"] == 0
+        assert response.json()["updated"] == 1
+        with Session(engine) as db:
+            profile = db.exec(select(EmployeeProfile).where(EmployeeProfile.user_id == employee_id)).one()
+            assert profile.employee_no == "E-01"
+            assert profile.job_title == "工程师"
+            assert profile.business_role == "manager"
+            assert profile.level == "P7"
+            assert profile.skills_json == ["Python", "SQL"]
+            assert profile.capacity_percent == 65
+            assert profile.daily_cost == 1234.5
+            assert profile.manager_user_id is not None
+            assert profile.assistant_agent_id is not None
     finally:
         app.dependency_overrides.clear()

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from pathlib import PurePath
 from typing import Any
-from zipfile import BadZipFile
+from zipfile import BadZipFile, ZipFile
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
@@ -44,6 +44,10 @@ class EmployeeImportResult:
 
 
 class EmployeeImportTooManyRows(ValueError):
+    pass
+
+
+class EmployeeImportArchiveLimit(ValueError):
     pass
 
 
@@ -96,6 +100,8 @@ _HEADER_ALIASES = {
 }
 _REQUIRED_COLUMNS = {"username", "display_name", "department"}
 _SUPPORTED_ROLES = {"admin", "ceo", "manager", "member"}
+MAX_XLSX_ARCHIVE_ENTRIES = 512
+MAX_XLSX_ARCHIVE_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 
 
 def parse_employee_upload(filename: str, content: bytes) -> EmployeeImportResult:
@@ -108,6 +114,7 @@ def parse_employee_upload(filename: str, content: bytes) -> EmployeeImportResult
             raise ValueError("upload is empty or unreadable") from exc
         return _parse_rows(header, raw_rows)
     elif suffix == ".xlsx":
+        _preflight_xlsx_archive(content)
         try:
             workbook = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
             raw_rows = workbook.active.iter_rows(values_only=True)
@@ -122,6 +129,21 @@ def parse_employee_upload(filename: str, content: bytes) -> EmployeeImportResult
                 workbook.close()
     else:
         raise ValueError("only .csv and .xlsx files are supported")
+
+
+def _preflight_xlsx_archive(content: bytes) -> None:
+    """Reject hostile XLSX ZIP metadata before openpyxl expands any entry."""
+    try:
+        with ZipFile(BytesIO(content)) as archive:
+            entries = archive.infolist()
+            if len(entries) > MAX_XLSX_ARCHIVE_ENTRIES:
+                raise EmployeeImportArchiveLimit("xlsx_archive_limit")
+            if sum(entry.file_size for entry in entries) > MAX_XLSX_ARCHIVE_UNCOMPRESSED_BYTES:
+                raise EmployeeImportArchiveLimit("xlsx_archive_limit")
+    except EmployeeImportArchiveLimit:
+        raise
+    except (BadZipFile, OSError, KeyError) as exc:
+        raise ValueError("upload is unreadable") from exc
 
 def _parse_rows(raw_header: list[Any], raw_rows: Any) -> EmployeeImportResult:
     headers = _normalized_headers(raw_header)
