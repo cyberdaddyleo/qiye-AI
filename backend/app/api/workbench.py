@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import base64
 import secrets
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import Session, select
 
 from app.db import get_session
-from app.db.models import AgentProfile, Department, EmployeeProfile, User, UserAvatar, utc_now
+from app.db.models import (
+    AgentProfile,
+    Department,
+    EmployeeProfile,
+    User,
+    UserAvatar,
+    WorkProject,
+    WorkTask,
+    WorkTaskEvent,
+    utc_now,
+)
 from app.security.auth import ensure_current_user_tenant, get_current_user, hash_password
 from app.security.tenant import ensure_tenant
 from app.workbench.importer import (
@@ -27,12 +37,29 @@ from app.workbench.permissions import (
     can_view_employee,
     require_global_manager,
 )
+from app.workbench.schema import TaskRead, TaskReviewRequest, WorkTaskEventRead
 from app.workbench.service import (
+    add_task_comment,
     create_employee,
+    create_project,
+    create_task,
+    dashboard_for_user,
     delete_employee,
     department_for_tenant,
     employee_for_tenant,
+    ensure_task_visible,
+    list_visible_projects,
+    list_visible_tasks,
+    project_for_tenant,
+    project_progress,
+    review_task,
+    submit_task,
+    task_dependencies,
+    task_events,
+    task_for_tenant,
     update_employee,
+    update_project,
+    update_task,
     user_for_tenant,
 )
 
@@ -86,6 +113,95 @@ class EmployeeUpdate(BaseModel):
     manager_user_id: str | None = None
     assistant_agent_id: str | None = None
     status: Literal["active", "inactive"] | None = None
+
+
+class ProjectCreate(BaseModel):
+    tenant_id: str
+    name: str = Field(min_length=1, max_length=200)
+    objective: str = Field(min_length=1, max_length=4_000)
+    description: str | None = Field(default=None, max_length=10_000)
+    owner_user_id: str | None = None
+    department_id: str
+    status: Literal["active", "on_hold", "completed", "archived"] = "active"
+    health: Literal["on_track", "at_risk", "off_track"] = "on_track"
+    start_date: date | None = None
+    due_date: date | None = None
+    budget: float | None = Field(default=None, ge=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ProjectUpdate(BaseModel):
+    tenant_id: str
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    objective: str | None = Field(default=None, min_length=1, max_length=4_000)
+    description: str | None = Field(default=None, max_length=10_000)
+    owner_user_id: str | None = None
+    department_id: str | None = None
+    status: Literal["active", "on_hold", "completed", "archived"] | None = None
+    health: Literal["on_track", "at_risk", "off_track"] | None = None
+    start_date: date | None = None
+    due_date: date | None = None
+    budget: float | None = Field(default=None, ge=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class TaskCreate(BaseModel):
+    tenant_id: str
+    project_id: str
+    plan_id: str | None = None
+    parent_task_id: str | None = None
+    title: str = Field(min_length=1, max_length=300)
+    description: str | None = Field(default=None, max_length=10_000)
+    required_role: str | None = None
+    priority: Literal["low", "normal", "high", "urgent"] = "normal"
+    status: Literal["backlog", "blocked"] = "backlog"
+    assignee_user_id: str | None = None
+    reviewer_user_id: str | None = None
+    start_date: date | None = None
+    due_date: date | None = None
+    estimate_days: float | None = Field(default=None, ge=0)
+    acceptance_criteria: str | None = None
+    dependencies: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class TaskMutation(BaseModel):
+    tenant_id: str
+    version: int
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    description: str | None = Field(default=None, max_length=10_000)
+    priority: Literal["low", "normal", "high", "urgent"] | None = None
+    status: Literal["backlog", "blocked", "in_progress", "review", "done", "canceled"] | None = None
+    assignee_user_id: str | None = None
+    reviewer_user_id: str | None = None
+    start_date: date | None = None
+    due_date: date | None = None
+    estimate_days: float | None = Field(default=None, ge=0)
+    progress: int | None = Field(default=None, ge=0, le=100)
+    acceptance_criteria: str | None = None
+    dependencies: list[str] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class TaskComment(BaseModel):
+    tenant_id: str
+    version: int
+    comment: str = Field(min_length=1, max_length=10_000)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class TaskSubmit(BaseModel):
+    tenant_id: str
+    version: int
+    result_summary: str = Field(min_length=1, max_length=20_000)
+    artifact_refs: list[str] = Field(default_factory=list, max_length=100)
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class DepartmentResponse(BaseModel):
@@ -156,6 +272,30 @@ def _employee_response(db: Session, row: EmployeeProfile) -> EmployeeResponse:
     )
 
 
+def _event_response(row: WorkTaskEvent) -> WorkTaskEventRead:
+    return WorkTaskEventRead(
+        id=row.id,
+        task_id=row.task_id,
+        tenant_id=row.tenant_id,
+        actor_user_id=row.actor_user_id,
+        actor_type=row.actor_type,
+        event_type=row.event_type,
+        payload=row.payload_json,
+        created_at=row.created_at,
+    )
+
+
+def _task_response(db: Session, row: WorkTask) -> TaskRead:
+    values = row.model_dump()
+    values["dependencies"] = task_dependencies(db, row)
+    values["events"] = [_event_response(event) for event in task_events(db, row)]
+    return TaskRead.model_validate(values)
+
+
+def _project_response(db: Session, row: WorkProject) -> dict[str, object]:
+    return {**row.model_dump(), **project_progress(db, row)}
+
+
 def _access(db: Session, tenant_id: str, user: User) -> WorkbenchAccess:
     ensure_tenant(db, tenant_id)
     ensure_current_user_tenant(tenant_id, user)
@@ -169,12 +309,201 @@ def _ensure_department_manage(access: WorkbenchAccess, department_id: str | None
 
 def _ensure_global_role_assignment(access: WorkbenchAccess, business_role: str | None) -> None:
     if business_role in {"admin", "ceo"} and not access.can_view_all:
-        raise HTTPException(status_code=403, detail="Only administrator or CEO can grant global employee roles")
+        raise HTTPException(
+            status_code=403, detail="Only administrator or CEO can grant global employee roles"
+        )
+
+
+@router.post("/projects", status_code=201)
+def create_project_endpoint(
+    request: ProjectCreate,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    _access(db, request.tenant_id, current_user)
+    values = request.model_dump(exclude={"tenant_id"})
+    row = create_project(db, request.tenant_id, values, current_user.id)
+    return _project_response(db, row)
+
+
+@router.get("/projects")
+def list_projects_endpoint(
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> list[dict[str, object]]:
+    _access(db, tenant_id, current_user)
+    return [
+        _project_response(db, row) for row in list_visible_projects(db, tenant_id, current_user.id)
+    ]
+
+
+@router.get("/projects/{project_id}")
+def get_project_endpoint(
+    project_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    _access(db, tenant_id, current_user)
+    row = project_for_tenant(db, tenant_id, project_id)
+    visible_ids = {project.id for project in list_visible_projects(db, tenant_id, current_user.id)}
+    if row.id not in visible_ids:
+        raise HTTPException(status_code=403, detail="Cannot view this project")
+    return _project_response(db, row)
+
+
+@router.put("/projects/{project_id}")
+def update_project_endpoint(
+    project_id: str,
+    request: ProjectUpdate,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    _access(db, request.tenant_id, current_user)
+    row = project_for_tenant(db, request.tenant_id, project_id)
+    values = request.model_dump(exclude_unset=True, exclude={"tenant_id"})
+    return _project_response(db, update_project(db, row, values, current_user.id))
+
+
+@router.post("/tasks", response_model=TaskRead, status_code=201)
+def create_task_endpoint(
+    request: TaskCreate,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> TaskRead:
+    _access(db, request.tenant_id, current_user)
+    row = create_task(
+        db,
+        request.tenant_id,
+        request.model_dump(exclude={"tenant_id"}),
+        current_user.id,
+    )
+    return _task_response(db, row)
+
+
+@router.get("/tasks", response_model=list[TaskRead])
+def list_tasks_endpoint(
+    tenant_id: str = Query(...),
+    scope: Literal["mine", "department", "all"] = Query("mine"),
+    status: Literal["backlog", "blocked", "in_progress", "review", "done", "canceled"]
+    | None = Query(None),
+    project_id: str | None = Query(None),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> list[TaskRead]:
+    _access(db, tenant_id, current_user)
+    rows = list_visible_tasks(
+        db, tenant_id, current_user.id, scope, status=status, project_id=project_id
+    )
+    return [_task_response(db, row) for row in rows]
+
+
+@router.get("/tasks/{task_id}", response_model=TaskRead)
+def get_task_endpoint(
+    task_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> TaskRead:
+    access = _access(db, tenant_id, current_user)
+    row = task_for_tenant(db, tenant_id, task_id)
+    ensure_task_visible(db, access, row)
+    return _task_response(db, row)
+
+
+@router.put("/tasks/{task_id}", response_model=TaskRead)
+def update_task_endpoint(
+    task_id: str,
+    request: TaskMutation,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> TaskRead:
+    _access(db, request.tenant_id, current_user)
+    row = task_for_tenant(db, request.tenant_id, task_id)
+    values = request.model_dump(exclude_unset=True, exclude={"tenant_id", "version"})
+    return _task_response(db, update_task(db, row, values, request.version, current_user.id))
+
+
+@router.post("/tasks/{task_id}/comments", response_model=TaskRead)
+def comment_task_endpoint(
+    task_id: str,
+    request: TaskComment,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> TaskRead:
+    _access(db, request.tenant_id, current_user)
+    row = task_for_tenant(db, request.tenant_id, task_id)
+    return _task_response(
+        db, add_task_comment(db, row, request.comment, request.version, current_user.id)
+    )
+
+
+@router.post("/tasks/{task_id}/submit", response_model=TaskRead)
+def submit_task_endpoint(
+    task_id: str,
+    request: TaskSubmit,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> TaskRead:
+    _access(db, request.tenant_id, current_user)
+    row = task_for_tenant(db, request.tenant_id, task_id)
+    return _task_response(
+        db,
+        submit_task(
+            db,
+            row,
+            request.version,
+            request.result_summary,
+            request.artifact_refs,
+            current_user.id,
+        ),
+    )
+
+
+@router.post("/tasks/{task_id}/review", response_model=TaskRead)
+def review_task_endpoint(
+    task_id: str,
+    request: TaskReviewRequest,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> TaskRead:
+    _access(db, request.tenant_id, current_user)
+    row = task_for_tenant(db, request.tenant_id, task_id)
+    return _task_response(
+        db,
+        review_task(
+            db,
+            row,
+            request.version,
+            request.verdict,
+            request.comment,
+            current_user.id,
+        ),
+    )
+
+
+@router.get("/dashboard")
+def dashboard_endpoint(
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    _access(db, tenant_id, current_user)
+    data = dashboard_for_user(db, tenant_id, current_user.id)
+    data["pending_reviews"] = [
+        _task_response(db, row).model_dump() for row in data["pending_reviews"]
+    ]
+    data["at_risk_tasks"] = [_task_response(db, row).model_dump() for row in data["at_risk_tasks"]]
+    data["recent_events"] = [_event_response(row).model_dump() for row in data["recent_events"]]
+    return data
 
 
 @router.post("/departments", response_model=DepartmentResponse, status_code=201)
 def create_department_endpoint(
-    request: DepartmentCreate, db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    request: DepartmentCreate,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> DepartmentResponse:
     require_global_manager(db, request.tenant_id, current_user.id)
     if request.parent_id:
@@ -190,14 +519,18 @@ def create_department_endpoint(
 
 @router.get("/departments", response_model=list[DepartmentResponse])
 def list_departments(
-    tenant_id: str = Query(...), db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[DepartmentResponse]:
     access = _access(db, tenant_id, current_user)
     if access.can_view_all:
         rows = db.exec(select(Department).where(Department.tenant_id == tenant_id)).all()
     elif access.managed_department_ids:
         rows = db.exec(
-            select(Department).where(Department.tenant_id == tenant_id, Department.id.in_(access.managed_department_ids))
+            select(Department).where(
+                Department.tenant_id == tenant_id, Department.id.in_(access.managed_department_ids)
+            )
         ).all()
     else:
         raise HTTPException(status_code=403, detail="Cannot view departments")
@@ -206,7 +539,10 @@ def list_departments(
 
 @router.get("/departments/{department_id}", response_model=DepartmentResponse)
 def get_department(
-    department_id: str, tenant_id: str = Query(...), db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    department_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> DepartmentResponse:
     access = _access(db, tenant_id, current_user)
     row = department_for_tenant(db, tenant_id, department_id)
@@ -217,7 +553,10 @@ def get_department(
 
 @router.patch("/departments/{department_id}", response_model=DepartmentResponse)
 def update_department_endpoint(
-    department_id: str, request: DepartmentUpdate, db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    department_id: str,
+    request: DepartmentUpdate,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> DepartmentResponse:
     access = _access(db, request.tenant_id, current_user)
     row = department_for_tenant(db, request.tenant_id, department_id)
@@ -238,7 +577,10 @@ def update_department_endpoint(
 
 @router.delete("/departments/{department_id}", status_code=204)
 def delete_department_endpoint(
-    department_id: str, tenant_id: str = Query(...), db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    department_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> Response:
     require_global_manager(db, tenant_id, current_user.id)
     row = department_for_tenant(db, tenant_id, department_id)
@@ -251,7 +593,9 @@ def delete_department_endpoint(
 
 @router.post("/employees", response_model=EmployeeResponse, status_code=201)
 def create_employee_endpoint(
-    request: EmployeeCreate, db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    request: EmployeeCreate,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> EmployeeResponse:
     access = _access(db, request.tenant_id, current_user)
     _ensure_department_manage(access, request.department_id)
@@ -264,7 +608,9 @@ def create_employee_endpoint(
 
 @router.get("/employees", response_model=list[EmployeeResponse])
 def list_employees(
-    tenant_id: str = Query(...), db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> list[EmployeeResponse]:
     access = _access(db, tenant_id, current_user)
     if access.can_view_all:
@@ -283,7 +629,10 @@ def list_employees(
 
 @router.get("/employees/{employee_id}", response_model=EmployeeResponse)
 def get_employee(
-    employee_id: str, tenant_id: str = Query(...), db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    employee_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> EmployeeResponse:
     _access(db, tenant_id, current_user)
     row = employee_for_tenant(db, tenant_id, employee_id)
@@ -314,12 +663,17 @@ def get_employee_avatar(
         raise HTTPException(status_code=404, detail="Avatar not found") from exc
     if not content_type.startswith("image/"):
         raise HTTPException(status_code=404, detail="Avatar not found")
-    return Response(content=data, media_type=content_type, headers={"Cache-Control": "private, no-cache"})
+    return Response(
+        content=data, media_type=content_type, headers={"Cache-Control": "private, no-cache"}
+    )
 
 
 @router.patch("/employees/{employee_id}", response_model=EmployeeResponse)
 def update_employee_endpoint(
-    employee_id: str, request: EmployeeUpdate, db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    employee_id: str,
+    request: EmployeeUpdate,
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> EmployeeResponse:
     _access(db, request.tenant_id, current_user)
     row = employee_for_tenant(db, request.tenant_id, employee_id)
@@ -339,7 +693,10 @@ def update_employee_endpoint(
 
 @router.delete("/employees/{employee_id}", status_code=204)
 def delete_employee_endpoint(
-    employee_id: str, tenant_id: str = Query(...), db: Session = Depends(get_session), current_user: User = Depends(get_current_user)
+    employee_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ) -> Response:
     _access(db, tenant_id, current_user)
     row = employee_for_tenant(db, tenant_id, employee_id)
@@ -363,7 +720,9 @@ async def import_employees(
     try:
         parsed = parse_employee_upload(file.filename or "", content)
     except EmployeeImportArchiveLimit as exc:
-        raise HTTPException(status_code=413, detail="XLSX archive exceeds import safety limits") from exc
+        raise HTTPException(
+            status_code=413, detail="XLSX archive exceeds import safety limits"
+        ) from exc
     except EmployeeImportTooManyRows as exc:
         raise HTTPException(status_code=413, detail="Import contains more than 2,000 rows") from exc
     except ValueError as exc:
@@ -390,7 +749,9 @@ async def import_employees(
             )
         ).first()
         assert department is not None
-        manager = _user_by_username(db, tenant_id, row.manager_username) if row.manager_username else None
+        manager = (
+            _user_by_username(db, tenant_id, row.manager_username) if row.manager_username else None
+        )
         user = _user_by_username(db, tenant_id, row.username)
         generated_password: str | None = None
         if user is None:
@@ -419,7 +780,11 @@ async def import_employees(
             profile = EmployeeProfile(tenant_id=tenant_id, user_id=user.id, **values)
             db.add(profile)
             created += 1
-            result: dict[str, object] = {"row": row.row_number, "username": row.username, "status": "created"}
+            result: dict[str, object] = {
+                "row": row.row_number,
+                "username": row.username,
+                "status": "created",
+            }
             if generated_password:
                 result["password"] = generated_password
         else:
@@ -443,9 +808,7 @@ def _user_by_username(db: Session, tenant_id: str, username: str | None) -> User
     ).first()
 
 
-def _import_row_error(
-    db: Session, tenant_id: str, row: EmployeeImportRow
-) -> dict[str, str] | None:
+def _import_row_error(db: Session, tenant_id: str, row: EmployeeImportRow) -> dict[str, str] | None:
     department = db.exec(
         select(Department).where(
             Department.tenant_id == tenant_id,
