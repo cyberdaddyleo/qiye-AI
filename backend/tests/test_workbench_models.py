@@ -27,6 +27,15 @@ from app.workbench.schema import (
 )
 
 
+def _plan_preview_request(**overrides: object) -> PlanPreviewRequest:
+    payload: dict[str, object] = {
+        "tenant_id": "tenant_1",
+        "project_id": "project_1",
+    }
+    payload.update(overrides)
+    return PlanPreviewRequest.model_validate(payload)
+
+
 @pytest.fixture
 def db() -> Session:
     engine = create_engine("sqlite://")
@@ -218,6 +227,70 @@ def test_workbench_dtos_are_strict_and_normalize_plan_credentials() -> None:
         updated_at="2026-09-04T00:00:00",
     )
     assert project.version == 3
+
+
+def test_plan_preview_request_normalizes_and_bounds_goal() -> None:
+    assert _plan_preview_request(goal="  交付企业工作台  ").goal == "交付企业工作台"
+    assert _plan_preview_request(goal=None).goal is None
+    assert _plan_preview_request(goal=f"  {'x' * 4_000}  ").goal == "x" * 4_000
+
+    for invalid_goal in ("   \t\n", "x" * 4_001):
+        with pytest.raises(ValidationError):
+            _plan_preview_request(goal=invalid_goal)
+
+
+@pytest.mark.parametrize("budget", [-0.01, float("nan"), float("inf"), float("-inf")])
+def test_plan_preview_request_rejects_invalid_budget(budget: float) -> None:
+    with pytest.raises(ValidationError):
+        _plan_preview_request(budget=budget)
+
+    assert _plan_preview_request(budget=0).budget == 0
+
+
+def test_plan_preview_request_bounds_constraints_by_compact_utf8_json_bytes() -> None:
+    json_overhead = len(b'{"note":""}')
+    at_limit = {"note": "x" * (2_000 - json_overhead)}
+    over_limit = {"note": "x" * (2_001 - json_overhead)}
+
+    assert _plan_preview_request(constraints=at_limit).constraints == at_limit
+    with pytest.raises(ValidationError):
+        _plan_preview_request(constraints=over_limit)
+
+    # Character-count truncation is insufficient for multibyte request input.
+    with pytest.raises(ValidationError):
+        _plan_preview_request(constraints={"note": "界" * 667})
+
+
+def test_plan_preview_request_bounds_constraint_structure() -> None:
+    at_depth: object = "ok"
+    for _ in range(7):
+        at_depth = {"level": at_depth}
+    over_depth = {"level": at_depth}
+
+    at_key_limit = {f"key_{index}": index for index in range(100)}
+    over_key_limit = {**at_key_limit, "overflow": True}
+    at_list_limit = list(range(100))
+    over_list_limit = list(range(101))
+
+    assert _plan_preview_request(constraints={"root": at_depth}).constraints == {"root": at_depth}
+    assert _plan_preview_request(constraints=at_key_limit).constraints == at_key_limit
+    assert _plan_preview_request(constraints={"items": at_list_limit}).constraints == {
+        "items": at_list_limit
+    }
+
+    for invalid_constraints in (
+        {"root": over_depth},
+        over_key_limit,
+        {"items": over_list_limit},
+    ):
+        with pytest.raises(ValidationError):
+            _plan_preview_request(constraints=invalid_constraints)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_plan_preview_request_rejects_non_finite_nested_constraints(value: float) -> None:
+    with pytest.raises(ValidationError):
+        _plan_preview_request(constraints={"nested": [{"value": value}]})
 
 
 def test_workbench_project_and_dispatch_audit_migrate_existing_sqlite_tables() -> None:

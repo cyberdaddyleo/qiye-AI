@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db.models import (
+    ChatSession,
     Department,
     EmployeeProfile,
     ModelConfig,
@@ -103,6 +104,48 @@ EXPECTED_DEPENDENCIES = {
 
 def _model_ids(db: Session, model: type) -> tuple[str, ...]:
     return tuple(sorted(row.id for row in db.exec(select(model)).all()))
+
+
+def _add_pristine_demo_identities(db: Session) -> None:
+    db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
+    db.add_all(
+        [
+            User(
+                id="admin",
+                tenant_id="tenant_demo",
+                username="admin",
+                display_name="Administrator",
+                role="admin",
+                password_hash="admin-hash",
+            ),
+            User(
+                id="user_demo",
+                tenant_id="tenant_demo",
+                username="user_demo",
+                display_name="Demo User",
+                password_hash="demo-hash",
+            ),
+        ]
+    )
+    db.commit()
+
+
+def _remove_quantxy_workbench_example(db: Session) -> None:
+    for model in (
+        WorkTaskEvent,
+        WorkTaskDependency,
+        WorkTask,
+        WorkPlan,
+        WorkProject,
+        EmployeeProfile,
+        Department,
+    ):
+        for row in db.exec(select(model)).all():
+            db.delete(row)
+    for user in db.exec(select(User)).all():
+        if user.id.startswith("user_quantxy_"):
+            db.delete(user)
+    db.commit()
 
 
 def _seed_demo_data_in_process(
@@ -1772,6 +1815,180 @@ def test_quantxy_workbench_seed_skips_tenants_with_an_existing_organization(
         assert _model_ids(db, WorkTaskEvent) == ()
         assert db.get(User, admin.id).display_name == "用户自己的管理员"
         assert db.get(User, demo_user.id).display_name == "用户自己的演示账号"
+
+
+@pytest.mark.parametrize("customization", ["extra_user", "custom_admin_id", "custom_name"])
+def test_quantxy_workbench_seed_fails_closed_for_customized_demo_identities(
+    customization: str,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        admin_id = "company_admin" if customization == "custom_admin_id" else "admin"
+        admin_name = "企业管理员" if customization == "custom_name" else "Administrator"
+        db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
+        db.add_all(
+            [
+                User(
+                    id=admin_id,
+                    tenant_id="tenant_demo",
+                    username="admin",
+                    display_name=admin_name,
+                    role="admin",
+                    password_hash="company-admin-hash",
+                ),
+                User(
+                    id="user_demo",
+                    tenant_id="tenant_demo",
+                    username="user_demo",
+                    display_name="Demo User",
+                    password_hash="demo-hash",
+                ),
+            ]
+        )
+        if customization == "extra_user":
+            db.add(
+                User(
+                    id="user_alice",
+                    tenant_id="tenant_demo",
+                    username="alice",
+                    display_name="Alice",
+                    password_hash="alice-hash",
+                )
+            )
+        db.commit()
+
+        original_users = _model_ids(db, User)
+        db.rollback()
+        seed_quantxy_workbench(db)
+        db.commit()
+
+        assert _model_ids(db, User) == original_users
+        assert _model_ids(db, Department) == ()
+        assert _model_ids(db, EmployeeProfile) == ()
+        assert _model_ids(db, WorkProject) == ()
+        assert _model_ids(db, WorkPlan) == ()
+        assert _model_ids(db, WorkTask) == ()
+        assert _model_ids(db, WorkTaskDependency) == ()
+        assert _model_ids(db, WorkTaskEvent) == ()
+
+
+@pytest.mark.parametrize(
+    "business_kind",
+    ["project", "plan", "task", "dependency", "event"],
+)
+def test_quantxy_workbench_seed_fails_closed_for_existing_business_data(
+    business_kind: str,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        _add_pristine_demo_identities(db)
+        rows = {
+            "project": WorkProject(
+                id="project_user_owned",
+                tenant_id="tenant_demo",
+                name="用户项目",
+                objective="真实业务目标",
+                owner_user_id="admin",
+            ),
+            "plan": WorkPlan(
+                id="plan_user_owned",
+                tenant_id="tenant_demo",
+                project_id="project_external",
+                created_by_user_id="admin",
+                goal="真实业务目标",
+            ),
+            "task": WorkTask(
+                id="task_user_owned",
+                tenant_id="tenant_demo",
+                project_id="project_external",
+                title="真实业务任务",
+            ),
+            "dependency": WorkTaskDependency(
+                id="taskdep_user_owned",
+                tenant_id="tenant_demo",
+                task_id="task_external_2",
+                depends_on_task_id="task_external_1",
+            ),
+            "event": WorkTaskEvent(
+                id="taskevent_user_owned",
+                tenant_id="tenant_demo",
+                task_id="task_external",
+                actor_user_id="admin",
+                actor_type="user",
+                event_type="task_created",
+            ),
+        }
+        db.add(rows[business_kind])
+        db.commit()
+
+        original_ids = {
+            model: _model_ids(db, model)
+            for model in (
+                User,
+                Department,
+                EmployeeProfile,
+                WorkProject,
+                WorkPlan,
+                WorkTask,
+                WorkTaskDependency,
+                WorkTaskEvent,
+            )
+        }
+        db.rollback()
+        seed_quantxy_workbench(db)
+        db.commit()
+
+        assert {
+            model: _model_ids(db, model)
+            for model in original_ids
+        } == original_ids
+
+
+def test_quantxy_workbench_seed_upgrades_the_complete_pristine_demo_baseline() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        seed_demo_data(db)
+        _remove_quantxy_workbench_example(db)
+
+        seed_quantxy_workbench(db)
+        db.commit()
+
+        assert _model_ids(db, Department) == tuple(sorted(EXPECTED_DEPARTMENTS))
+        assert _model_ids(db, EmployeeProfile) == tuple(sorted(EXPECTED_EMPLOYEES))
+        assert _model_ids(db, WorkProject) == ("project_quantxy_delivery_example",)
+
+
+def test_quantxy_workbench_seed_fails_closed_for_legacy_demo_business_activity() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        seed_demo_data(db)
+        _remove_quantxy_workbench_example(db)
+        db.add(
+            ChatSession(
+                id="session_user_owned",
+                tenant_id="tenant_demo",
+                user_id="user_demo",
+                title="真实业务会话",
+            )
+        )
+        db.commit()
+
+        seed_quantxy_workbench(db)
+        db.commit()
+
+        assert db.get(ChatSession, "session_user_owned") is not None
+        assert _model_ids(db, User) == ("admin", "user_demo")
+        assert _model_ids(db, Department) == ()
+        assert _model_ids(db, EmployeeProfile) == ()
+        assert _model_ids(db, WorkProject) == ()
 
 
 @pytest.mark.parametrize("tenant_id", ["tenant_a", "tenant_b"])

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 import re
 from datetime import date, datetime
 from typing import Any, Literal
@@ -17,6 +19,60 @@ PlanSource = Literal["model", "fallback"]
 TaskStatus = Literal["backlog", "blocked", "in_progress", "review", "done", "canceled"]
 TaskPriority = Literal["low", "normal", "high", "urgent"]
 ReviewVerdict = Literal["approve", "rework"]
+
+_PLAN_GOAL_MAX_LENGTH = 4_000
+_PLAN_CONSTRAINTS_MAX_BYTES = 2_000
+_PLAN_CONSTRAINTS_MAX_DEPTH = 8
+_PLAN_CONSTRAINTS_MAX_KEYS = 100
+_PLAN_CONSTRAINTS_MAX_LIST_LENGTH = 100
+
+
+def _validate_plan_constraint_value(
+    value: Any,
+    *,
+    depth: int,
+    key_count: list[int],
+) -> None:
+    if isinstance(value, dict):
+        if depth > _PLAN_CONSTRAINTS_MAX_DEPTH:
+            raise ValueError(
+                f"constraints nesting must not exceed {_PLAN_CONSTRAINTS_MAX_DEPTH} levels"
+            )
+        key_count[0] += len(value)
+        if key_count[0] > _PLAN_CONSTRAINTS_MAX_KEYS:
+            raise ValueError(
+                f"constraints must not contain more than {_PLAN_CONSTRAINTS_MAX_KEYS} keys"
+            )
+        for nested in value.values():
+            _validate_plan_constraint_value(
+                nested,
+                depth=depth + 1,
+                key_count=key_count,
+            )
+        return
+
+    if isinstance(value, list):
+        if depth > _PLAN_CONSTRAINTS_MAX_DEPTH:
+            raise ValueError(
+                f"constraints nesting must not exceed {_PLAN_CONSTRAINTS_MAX_DEPTH} levels"
+            )
+        if len(value) > _PLAN_CONSTRAINTS_MAX_LIST_LENGTH:
+            raise ValueError(
+                "constraint lists must not contain more than "
+                f"{_PLAN_CONSTRAINTS_MAX_LIST_LENGTH} items"
+            )
+        for nested in value:
+            _validate_plan_constraint_value(
+                nested,
+                depth=depth + 1,
+                key_count=key_count,
+            )
+        return
+
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("constraints must contain only finite numbers")
+    if value is not None and not isinstance(value, (str, int, float, bool)):
+        raise ValueError("constraints must contain only JSON-compatible values")
 
 
 class WorkbenchAccessRead(BaseModel):
@@ -89,12 +145,41 @@ class ProjectRead(BaseModel):
 class PlanPreviewRequest(BaseModel):
     tenant_id: str
     project_id: str
-    goal: str | None = None
+    goal: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_PLAN_GOAL_MAX_LENGTH,
+    )
     deadline: date | None = None
-    budget: float | None = None
+    budget: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     constraints: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("goal", mode="before")
+    @classmethod
+    def strip_goal(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("constraints")
+    @classmethod
+    def validate_constraints(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_plan_constraint_value(value, depth=1, key_count=[0])
+        try:
+            encoded = json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError("constraints must be JSON serializable") from exc
+        if len(encoded) > _PLAN_CONSTRAINTS_MAX_BYTES:
+            raise ValueError(
+                f"constraints JSON must not exceed {_PLAN_CONSTRAINTS_MAX_BYTES} UTF-8 bytes"
+            )
+        return value
 
 
 class PlanDispatchTask(BaseModel):

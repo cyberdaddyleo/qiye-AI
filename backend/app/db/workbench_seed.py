@@ -13,12 +13,14 @@ from sqlalchemy import event
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import SessionTransaction
-from sqlmodel import Session, select
+from sqlmodel import Session, SQLModel, select
 
 from app.db.models import (
     Department,
     EmployeeProfile,
+    Tenant,
     User,
+    WorkPlan,
     WorkProject,
     WorkTask,
     WorkTaskDependency,
@@ -35,6 +37,44 @@ _PREEXISTING_TRANSACTION_ERROR = (
 _WINDOWS_LOCK_RETRY_SECONDS = 0.01
 _WINDOWS_LOCK_CONTENTION_ERRNOS = {errno.EACCES, errno.EAGAIN}
 _WINDOWS_LOCK_CONTENTION_WINERRORS = {32, 33}
+_DEMO_TENANT_IDENTITY = (TENANT_ID, "Demo Enterprise")
+_DEMO_USER_IDENTITIES = {
+    "admin": ("admin", "admin", "admin", "web", {None, "Administrator"}),
+    "user_demo": ("user_demo", "user_demo", "member", "web", {None, "Demo User"}),
+}
+_WORKBENCH_BUSINESS_MODELS = (
+    Department,
+    EmployeeProfile,
+    WorkProject,
+    WorkPlan,
+    WorkTask,
+    WorkTaskDependency,
+    WorkTaskEvent,
+)
+_BUILTIN_DEMO_BASELINE_TABLES = {
+    "agent_knowledge_branches",
+    "agent_profiles",
+    "agent_resource_bindings",
+    "agent_skill_branch_versions",
+    "agent_skill_branches",
+    "general_skills",
+    "knowledge_base_versions",
+    "knowledge_bases",
+    "knowledge_buckets",
+    "knowledge_chunks",
+    "knowledge_concepts",
+    "knowledge_discovery_suggestions",
+    "knowledge_documents",
+    "knowledge_ingest_jobs",
+    "mcp_servers",
+    "model_configs",
+    "persona_configs",
+    "skill_versions",
+    "skills",
+    "tenants",
+    "tools",
+    "users",
+}
 
 
 @dataclass(frozen=True)
@@ -209,6 +249,47 @@ def _user_by_username(session: Session, tenant_id: str, username: str) -> User |
     ).first()
 
 
+def _is_pristine_demo_database(session: Session, tenant_id: str) -> bool:
+    tenants = session.exec(select(Tenant)).all()
+    if {(tenant.id, tenant.name) for tenant in tenants} != {_DEMO_TENANT_IDENTITY}:
+        return False
+
+    users = session.exec(select(User)).all()
+    if {user.id for user in users} != set(_DEMO_USER_IDENTITIES):
+        return False
+    for user in users:
+        user_id, username, role, source, display_names = _DEMO_USER_IDENTITIES[user.id]
+        if (
+            user.tenant_id != tenant_id
+            or user.id != user_id
+            or user.username != username
+            or user.role != role
+            or user.source != source
+            or user.display_name not in display_names
+        ):
+            return False
+
+    has_workbench_data = any(
+        session.exec(select(model.id).limit(1)).first() is not None
+        for model in _WORKBENCH_BUSINESS_MODELS
+    )
+    if has_workbench_data:
+        return False
+
+    allowed_tables = _BUILTIN_DEMO_BASELINE_TABLES | {
+        model.__tablename__ for model in _WORKBENCH_BUSINESS_MODELS
+    }
+    for table_name, table in SQLModel.metadata.tables.items():
+        if table_name in allowed_tables:
+            continue
+        identity_column = next(iter(table.primary_key.columns), None)
+        if identity_column is None:
+            identity_column = next(iter(table.columns))
+        if session.exec(select(identity_column).limit(1)).first() is not None:
+            return False
+    return True
+
+
 def _seed_users(session: Session, tenant_id: str) -> dict[str, User]:
     admin = _user_by_username(session, tenant_id, "admin")
     demo_user = _user_by_username(session, tenant_id, "user_demo")
@@ -293,6 +374,14 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
 
 def _seed_quantxy_workbench_once(session: Session, tenant_id: str) -> None:
     if _has_workbench_organization(session, tenant_id):
+        return
+
+    if (
+        _user_by_username(session, tenant_id, "admin") is None
+        or _user_by_username(session, tenant_id, "user_demo") is None
+    ):
+        raise RuntimeError("QuantXY workbench seed requires the demo admin and user")
+    if not _is_pristine_demo_database(session, tenant_id):
         return
 
     users = _seed_users(session, tenant_id)
