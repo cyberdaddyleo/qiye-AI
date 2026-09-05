@@ -432,6 +432,7 @@ export default function PlanningPage({ currentUser, onLogout }: PlanningPageProp
           </div>
           <PlanComparison
             variants={variants}
+            originalVariants={originalVariants}
             employees={employees}
             selectedVariantKey={selectedVariantKey}
             editedVariantKeys={editedVariantKeys}

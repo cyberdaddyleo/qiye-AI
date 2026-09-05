@@ -15,6 +15,7 @@ import WorkloadBar from './WorkloadBar';
 
 export type PlanComparisonProps = {
   variants: PlanVariant[];
+  originalVariants: PlanVariant[];
   employees: EmployeeRead[];
   selectedVariantKey: PlanVariantKey;
   editedVariantKeys?: PlanVariantKey[];
@@ -43,8 +44,49 @@ function metric(value: unknown, fallback = '待计算'): string {
   return fallback;
 }
 
+function variantEmployeeIdentifiers(variant: PlanVariant | undefined): string[] {
+  if (!variant) return [];
+  const identifiers = new Set<string>([
+    ...Object.keys(variant.utilization),
+    ...Object.keys(variant.metrics.effective_capacity_percent || {}),
+  ]);
+  variant.tasks.forEach((task) => {
+    if (task.assignee_user_id) identifiers.add(task.assignee_user_id);
+    if (task.assignment.previous_assignee_user_id) {
+      identifiers.add(task.assignment.previous_assignee_user_id);
+    }
+    Object.keys(task.assignment.candidate_scores || {}).forEach((userId) => {
+      identifiers.add(userId);
+    });
+  });
+  return [...identifiers];
+}
+
+function sanitizeEmployeeIdentifiers(
+  value: string,
+  employees: Map<string, EmployeeRead>,
+  ...variants: Array<PlanVariant | undefined>
+): string {
+  const identifiers = new Set<string>(employees.keys());
+  variants.forEach((variant) => {
+    variantEmployeeIdentifiers(variant).forEach((userId) => identifiers.add(userId));
+  });
+  const ordered = [...identifiers].filter(Boolean).sort((left, right) => right.length - left.length);
+  if (ordered.length === 0) return value;
+  const replacements = new Map(ordered.map((userId) => {
+    const employee = employees.get(userId);
+    return [userId, employee?.display_name || employee?.username || '真人员工'];
+  }));
+  const pattern = new RegExp(
+    ordered.map((userId) => userId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+    'g',
+  );
+  return value.replace(pattern, (userId) => replacements.get(userId) || '真人员工');
+}
+
 export default function PlanComparison({
   variants,
+  originalVariants,
   employees,
   selectedVariantKey,
   editedVariantKeys = [],
@@ -67,6 +109,7 @@ export default function PlanComparison({
       <section className="grid grid-cols-1 gap-[14px] xl:grid-cols-3" aria-label="规划方案比较">
         {variants.map((variant) => {
           const selected = variant.key === selectedVariantKey;
+          const originalVariant = originalVariants.find((candidate) => candidate.key === variant.key);
           const titleByKey = new Map(variant.tasks.map((task) => [task.key, task.title]));
           const criticalPath = Array.isArray(variant.metrics.critical_path)
             ? variant.metrics.critical_path.map((key) => titleByKey.get(key) || key).join(' → ')
@@ -142,10 +185,10 @@ export default function PlanComparison({
               </div>
 
               <div className="mt-[12px] space-y-[5px]">
-                {(variant.risks.length ? variant.risks : ['暂未识别显著风险']).map((risk) => (
-                  <p key={risk} className="m-0 flex gap-[6px] text-[10px] leading-[16px] text-[#a65f00]">
+                {(variant.risks.length ? variant.risks : ['暂未识别显著风险']).map((risk, index) => (
+                  <p key={`${risk}-${index}`} className="m-0 flex gap-[6px] text-[10px] leading-[16px] text-[#a65f00]">
                     <CircleAlert className="mt-[2px] size-[11px] shrink-0" aria-hidden="true" />
-                    {risk}
+                    {sanitizeEmployeeIdentifiers(risk, employeeByUserId, variant, originalVariant)}
                   </p>
                 ))}
               </div>
@@ -183,6 +226,13 @@ export default function PlanComparison({
             const assignee = task.assignee_user_id
               ? employeeByUserId.get(task.assignee_user_id)
               : undefined;
+            const originalTask = originalVariants
+              .find((variant) => variant.key === selectedVariant.key)
+              ?.tasks.find((candidate) => candidate.key === task.key);
+            const originalAssigneeUserId = originalTask?.assignee_user_id || null;
+            const originalAssignee = originalAssigneeUserId
+              ? employeeByUserId.get(originalAssigneeUserId)
+              : undefined;
             const manualAssignment = task.assignment.provenance === 'manual';
             const manualAssignmentLabel = task.assignment.manual_assignment_kind === 'reassigned'
               ? '人工改派'
@@ -214,7 +264,12 @@ export default function PlanComparison({
                       className="h-[34px] w-full rounded-[9px] border border-[#e3e7f1] bg-white px-[10px] text-[12px] text-[#464c5e] outline-none focus:border-[#18181a]"
                     >
                       <option value="">待人工指派</option>
-                      {task.assignee_user_id && !assignee && (
+                      {originalAssigneeUserId && !originalAssignee && (
+                        <option value={originalAssigneeUserId}>AI 原负责人 · 目录信息受限</option>
+                      )}
+                      {task.assignee_user_id
+                        && !assignee
+                        && task.assignee_user_id !== originalAssigneeUserId && (
                         <option value={task.assignee_user_id}>当前真人负责人 · 目录信息受限</option>
                       )}
                       {employees.filter((row) => row.status === 'active').map((row) => (
@@ -299,15 +354,37 @@ export default function PlanComparison({
                         ) : (
                           <>
                             <span className="font-medium text-[#596176]">AI 推荐理由：</span>
-                            {task.assignment.rationale || '此负责人来自 AI 原始方案推荐。'}
+                            {sanitizeEmployeeIdentifiers(
+                              task.assignment.rationale || '此负责人来自 AI 原始方案推荐。',
+                              employeeByUserId,
+                              selectedVariant,
+                              originalVariants.find((variant) => variant.key === selectedVariant.key),
+                            )}
                           </>
                         )}
                       </p>
                     </div>
                   ) : task.assignee_user_id ? (
-                    <p className="m-0 text-[10px] font-medium leading-[17px] text-[#596176]">
-                      已指派（员工目录信息受限）
-                    </p>
+                    <div className="grid gap-[5px]">
+                      <p className="m-0 text-[10px] font-medium leading-[17px] text-[#596176]">
+                        已指派（员工目录信息受限）
+                      </p>
+                      <p className="m-0 text-[10px] leading-[17px] text-[#757f9c]">
+                        {manualAssignment ? (
+                          <span className="font-medium text-[#596176]">{manualAssignmentLabel}</span>
+                        ) : (
+                          <>
+                            <span className="font-medium text-[#596176]">AI 推荐理由：</span>
+                            {sanitizeEmployeeIdentifiers(
+                              task.assignment.rationale || '此负责人来自 AI 原始方案推荐。',
+                              employeeByUserId,
+                              selectedVariant,
+                              originalVariants.find((variant) => variant.key === selectedVariant.key),
+                            )}
+                          </>
+                        )}
+                      </p>
+                    </div>
                   ) : (
                     <p className="m-0 flex items-start gap-[6px] text-[10px] leading-[17px] text-[#a65f00]">
                       <CircleAlert className="mt-[2px] size-[11px] shrink-0" aria-hidden="true" />

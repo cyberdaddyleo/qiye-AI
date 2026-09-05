@@ -402,6 +402,27 @@ describe('PlanningPage', () => {
     expect(within(wbs).getByLabelText('上线发布截止日期')).toHaveProperty('value', '2026-09-07');
   });
 
+  it('replaces employee identifiers in historical planner risks before rendering them', async () => {
+    const historicalPlan: PlanRead = {
+      ...fallbackPlan,
+      variants: fallbackPlan.variants.map((candidate) => ({
+        ...candidate,
+        risks: [
+          `快速方案将员工 ${employee.user_id} 容量由 80%→96%，需关注过载`,
+        ],
+      })),
+    };
+    vi.mocked(workbenchApi.previewPlan).mockResolvedValueOnce(historicalPlan);
+    const user = userEvent.setup();
+    renderPlanning();
+
+    await generatePlan(user);
+    const fast = await screen.findByRole('article', { name: 'B 方案' });
+
+    expect(fast.textContent).toContain('快速方案将员工 林珊 容量由 80%→96%');
+    expect(document.body.textContent).not.toContain(employee.user_id);
+  });
+
   it('requires explicit confirmation, dispatches once with a stable key, and navigates to tasks', async () => {
     const dispatch = deferred<TaskRead[]>();
     vi.mocked(workbenchApi.dispatchPlan).mockReturnValueOnce(dispatch.promise);
@@ -619,6 +640,9 @@ describe('PlanningPage', () => {
       ...fallbackPlan,
       variants: fallbackPlan.variants.map((candidate) => ({
         ...candidate,
+        risks: [
+          `快速方案将员工 ${restrictedAssigneeIds[0]} 容量由 80%→96%，需关注过载`,
+        ],
         utilization: {
           [restrictedAssigneeIds[0]]: {
             assigned_days: 2,
@@ -653,12 +677,27 @@ describe('PlanningPage', () => {
     const wbs = screen.getByRole('region', { name: '可编辑 WBS' });
     expect(within(wbs).getAllByText('已指派（员工目录信息受限）')).toHaveLength(2);
     expect(within(wbs).getAllByRole('option', {
-      name: '当前真人负责人 · 目录信息受限',
+      name: 'AI 原负责人 · 目录信息受限',
     })).toHaveLength(2);
     expect(within(wbs).queryByText(/暂无合适员工/)).toBeNull();
+    expect(document.body.textContent).toContain('快速方案将员工 真人员工 容量由 80%→96%');
     for (const userId of restrictedAssigneeIds) {
       expect(document.body.textContent).not.toContain(userId);
     }
+
+    const researchAssignee = within(wbs).getByLabelText('用户研究负责人');
+    await user.selectOptions(researchAssignee, '');
+    expect(researchAssignee).toHaveProperty('value', '');
+    expect(within(researchAssignee).getByRole('option', {
+      name: 'AI 原负责人 · 目录信息受限',
+    })).toBeTruthy();
+
+    await user.selectOptions(researchAssignee, restrictedAssigneeIds[0]);
+    expect(researchAssignee).toHaveProperty('value', restrictedAssigneeIds[0]);
+    expect(within(wbs).queryByText('人工改派')).toBeNull();
+    expect(within(wbs).queryByText('人工指定')).toBeNull();
+    expect(within(wbs).getAllByText('受限目录中的内部匹配依据')).toHaveLength(2);
+    expect(screen.queryByText('WBS 已修改，估算未重新计算')).toBeNull();
 
     await user.click(screen.getByRole('button', { name: '进入确认' }));
     expect(screen.getByText('真人负责人 2 人 · 待人工指派 0 项')).toBeTruthy();
@@ -673,5 +712,60 @@ describe('PlanningPage', () => {
     expect(vi.mocked(workbenchApi.dispatchPlan).mock.calls[0][1].tasks.map(
       (task) => task.assignee_user_id,
     )).toEqual(restrictedAssigneeIds);
+  });
+
+  it('keeps a hidden AI original assignee available after choosing another visible employee', async () => {
+    const ownerAccess: WorkbenchAccessRead = {
+      ...managerAccess,
+      business_role: 'member',
+      directory_scope: 'self',
+      can_create_project: false,
+      can_view_all: false,
+      managed_department_ids: [],
+    };
+    const originalAssigneeId = 'user-hidden-ai-owner';
+    const restrictedPlan: PlanRead = {
+      ...fallbackPlan,
+      variants: fallbackPlan.variants.map((candidate) => ({
+        ...candidate,
+        tasks: candidate.tasks.map((task) => task.key === 'research' ? {
+          ...task,
+          assignee_user_id: originalAssigneeId,
+          assignment: { rationale: '不可变 AI 原始匹配依据' },
+        } : task),
+      })),
+    };
+    vi.mocked(workbenchApi.getAccess).mockResolvedValueOnce(ownerAccess);
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([alternateEmployee]);
+    vi.mocked(workbenchApi.previewPlan).mockResolvedValueOnce(restrictedPlan);
+    const user = userEvent.setup();
+    renderPlanning('/enterprise/planning?project_id=project-launch', manager);
+
+    await generatePlan(user);
+    const wbs = await screen.findByRole('region', { name: '可编辑 WBS' });
+    const assignee = within(wbs).getByLabelText('用户研究负责人');
+    expect(within(assignee).getByRole('option', {
+      name: 'AI 原负责人 · 目录信息受限',
+    })).toBeTruthy();
+
+    await user.selectOptions(assignee, alternateEmployee.user_id);
+    expect(within(wbs).getByText('人工改派')).toBeTruthy();
+    expect(within(assignee).getByRole('option', {
+      name: 'AI 原负责人 · 目录信息受限',
+    })).toBeTruthy();
+
+    await user.selectOptions(assignee, originalAssigneeId);
+    expect(within(wbs).queryByText('人工改派')).toBeNull();
+    expect(within(wbs).getByText('不可变 AI 原始匹配依据')).toBeTruthy();
+    expect(screen.queryByText('WBS 已修改，估算未重新计算')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '进入确认' }));
+    await user.click(screen.getByRole('checkbox', { name: '我已确认由真人员工承担任务责任' }));
+    await user.click(screen.getByRole('button', { name: '确认并下发' }));
+
+    await waitFor(() => expect(workbenchApi.dispatchPlan).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(workbenchApi.dispatchPlan).mock.calls[0][1].tasks.find(
+      (task) => task.key === 'research',
+    )?.assignee_user_id).toBe(originalAssigneeId);
   });
 });

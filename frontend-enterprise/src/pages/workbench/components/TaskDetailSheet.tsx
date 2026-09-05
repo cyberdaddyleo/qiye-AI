@@ -129,6 +129,12 @@ export default function TaskDetailSheet({
     () => new Map(employees.map((employee) => [employee.user_id, employee])),
     [employees],
   );
+  const assignee = task?.assignee_user_id
+    ? employeeByUserId.get(task.assignee_user_id)
+    : undefined;
+  const reviewer = task?.reviewer_user_id
+    ? employeeByUserId.get(task.reviewer_user_id)
+    : undefined;
   const taskById = useMemo(() => new Map(allTasks.map((row) => [row.id, row])), [allTasks]);
   const project = task ? projects.find((row) => row.id === task.project_id) : undefined;
   const projectOwner = project?.owner_user_id === currentUser.id;
@@ -236,11 +242,11 @@ export default function TaskDetailSheet({
               <section className="grid gap-[10px] rounded-[14px] border border-[#edf0f5] bg-white p-[15px] sm:grid-cols-2">
                 <div>
                   <p className="mt-0 mb-[8px] text-[10px] font-medium text-[#858b9c]">真人负责人</p>
-                  <EmployeeBadgeContainer employee={employeeByUserId.get(task.assignee_user_id || '')} userId={task.assignee_user_id || undefined} compact subtitle="任务责任人" />
+                  <EmployeeBadgeContainer employee={assignee} name={task.assignee_user_id && !assignee ? '负责人信息受限' : undefined} compact subtitle="任务责任人" />
                 </div>
                 <div>
                   <p className="mt-0 mb-[8px] text-[10px] font-medium text-[#858b9c]">真人审核人</p>
-                  <EmployeeBadgeContainer employee={employeeByUserId.get(task.reviewer_user_id || '')} userId={task.reviewer_user_id || undefined} compact subtitle="成果审核人" />
+                  <EmployeeBadgeContainer employee={reviewer} name={task.reviewer_user_id && !reviewer ? '审核人信息受限' : undefined} compact subtitle="成果审核人" />
                 </div>
               </section>
 

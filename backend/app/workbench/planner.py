@@ -573,7 +573,7 @@ def _plan_variant(
             configured = employees_by_user[user_id].capacity_percent
             if effective_capacity > configured:
                 risks.append(
-                    f"快速方案将员工 {user_id} 容量由 {configured:g}%→"
+                    f"快速方案将一名已分配员工的容量由 {configured:g}%→"
                     f"{effective_capacity:g}%，需关注过载"
                 )
     if deadline and finish > deadline:

@@ -446,6 +446,8 @@ def test_fast_variant_scales_configured_capacity_by_twenty_percent() -> None:
     assert fast.tasks[0].due_date == date(2026, 9, 17)
     assert fast.metrics["duration_workdays"] == 9
     assert any("60%→72%" in risk for risk in fast.risks)
+    assert employee.user_id not in " ".join(fast.risks)
+    assert any("一名已分配员工" in risk for risk in fast.risks)
 
 
 def test_existing_unscheduled_work_accumulates_after_latest_committed_date() -> None:

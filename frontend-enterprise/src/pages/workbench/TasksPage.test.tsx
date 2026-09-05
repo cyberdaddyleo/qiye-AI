@@ -352,6 +352,44 @@ describe('TasksPage', () => {
     expect(sheet?.classList.contains('max-[640px]:max-w-none')).toBe(true);
   });
 
+  it('distinguishes assigned people with restricted directory details from unassigned roles', async () => {
+    const restrictedAssigneeId = 'user-private-assignee';
+    const restrictedReviewerId = 'user-private-reviewer';
+    const restricted = task('in_progress', 'task-private-people', '受限人员任务', {
+      assignee_user_id: restrictedAssigneeId,
+      reviewer_user_id: restrictedReviewerId,
+    });
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([]);
+    vi.mocked(workbenchApi.listTasks).mockResolvedValueOnce([restricted]);
+    vi.mocked(workbenchApi.getTask).mockResolvedValueOnce(restricted);
+    const user = userEvent.setup();
+    renderTasks();
+
+    await user.click(await screen.findByRole('button', { name: '打开任务 受限人员任务' }));
+    let dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('负责人信息受限')).toBeTruthy();
+    expect(within(dialog).getByText('审核人信息受限')).toBeTruthy();
+    expect(dialog.textContent).not.toContain(restrictedAssigneeId);
+    expect(dialog.textContent).not.toContain(restrictedReviewerId);
+    expect(within(dialog).queryByText('未分配员工')).toBeNull();
+    cleanup();
+
+    const unassigned = task('backlog', 'task-unassigned-people', '真实未分配任务', {
+      assignee_user_id: null,
+      reviewer_user_id: null,
+    });
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([]);
+    vi.mocked(workbenchApi.listTasks).mockResolvedValueOnce([unassigned]);
+    vi.mocked(workbenchApi.getTask).mockResolvedValueOnce(unassigned);
+    renderTasks();
+
+    await user.click(await screen.findByRole('button', { name: '打开任务 真实未分配任务' }));
+    dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getAllByText('未分配员工')).toHaveLength(2);
+    expect(within(dialog).queryByText('负责人信息受限')).toBeNull();
+    expect(within(dialog).queryByText('审核人信息受限')).toBeNull();
+  });
+
   it('lets an assignee start, comment, and submit while refetching detail and list after each mutation', async () => {
     const backlog = task('backlog', 'task-personal', '整理访谈结论', { version: 2 });
     const inProgressV3 = { ...backlog, status: 'in_progress' as const, version: 3 };
@@ -745,6 +783,7 @@ describe('MyWorkPage', () => {
   });
 
   it('shares the injected Shanghai business date with My Work and task cards', async () => {
+    vi.useFakeTimers();
     const boundaryTask = task('in_progress', 'task-shanghai-boundary', '上海零点边界任务', {
       due_date: '2026-09-04',
     });
@@ -754,12 +793,17 @@ describe('MyWorkPage', () => {
       now: new Date('2026-09-04T16:30:00.000Z'),
       timeZone: 'Asia/Shanghai',
     });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
 
     expect(
-      within(await screen.findByRole('article', { name: '已逾期' })).getByText('1'),
+      within(screen.getByRole('article', { name: '已逾期' })).getByText('1'),
     ).toBeTruthy();
     const card = screen.getByRole('button', { name: '打开任务 上海零点边界任务' });
     expect(within(card).getByText('2026-09-04').className).toContain('text-[#d20b0b]');
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('updates My Work KPIs and cards across local midnight without remounting', async () => {
