@@ -76,6 +76,7 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
   const [employees, setEmployees] = useState<EmployeeRead[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadFailure, setLoadFailure] = useState<ProjectLoadFailure | null>(null);
+  const [memberDirectoriesRestricted, setMemberDirectoriesRestricted] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<ProjectForm>(EMPTY_FORM);
@@ -86,6 +87,7 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
     let active = true;
     setLoading(true);
     setLoadFailure(null);
+    setMemberDirectoriesRestricted(false);
     void Promise.allSettled([
       workbenchApi.listProjects(currentUser.tenant_id),
       workbenchApi.listDepartments(currentUser.tenant_id),
@@ -107,8 +109,17 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
           ? employeeResult.value
           : [],
       );
+      const expectedMemberDirectoryDenials = currentUser.role === 'member'
+        && departmentResult.status === 'rejected'
+        && departmentResult.reason instanceof ApiError
+        && departmentResult.reason.status === 403
+        && employeeResult.status === 'rejected'
+        && employeeResult.reason instanceof ApiError
+        && employeeResult.reason.status === 403;
       if (projectResult.status === 'rejected') {
         setLoadFailure({ source: 'projects', reason: projectResult.reason });
+      } else if (expectedMemberDirectoryDenials) {
+        setMemberDirectoriesRestricted(true);
       } else if (departmentResult.status === 'rejected') {
         setLoadFailure({ source: 'departments', reason: departmentResult.reason });
       } else if (employeeResult.status === 'rejected') {
@@ -119,7 +130,7 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
     return () => {
       active = false;
     };
-  }, [currentUser.tenant_id, refreshKey]);
+  }, [currentUser.role, currentUser.tenant_id, refreshKey]);
 
   const self = employees.find((employee) => employee.user_id === currentUser.id);
   const canCreate = currentUser.role === 'admin'
@@ -217,7 +228,8 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
             <ProjectCard
               key={project.id}
               project={project}
-              departmentName={departmentById.get(project.department_id || '')?.name}
+              departmentName={departmentById.get(project.department_id || '')?.name
+                || (memberDirectoriesRestricted && project.department_id ? '部门信息受限' : undefined)}
             />
           ))}
         </div>

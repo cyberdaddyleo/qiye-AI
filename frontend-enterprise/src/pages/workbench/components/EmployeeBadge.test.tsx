@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EmployeeRead } from '@/types/workbench';
+
+import EmployeeBadge from './EmployeeBadge';
 
 const avatarPointer = '/api/enterprise/workbench/employees/employee-lin/avatar?tenant_id=tenant-demo';
 
@@ -29,78 +31,35 @@ const employee: EmployeeRead = {
   updated_at: '2026-09-04T08:00:00Z',
 };
 
-function storeSession() {
-  window.localStorage.setItem('ultrarag_auth', JSON.stringify({
-    token: 'session-secret',
-    user: {
-      id: employee.user_id,
-      tenant_id: employee.tenant_id,
-      username: employee.username,
-      role: 'member',
-    },
-  }));
-}
-
-async function renderBadge() {
-  const { default: EmployeeBadge } = await import('./EmployeeBadge');
-  return render(<EmployeeBadge employee={employee} />);
-}
-
 afterEach(() => {
   cleanup();
-  window.localStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
-  vi.unstubAllEnvs();
-  vi.resetModules();
 });
 
-describe('EmployeeBadge protected avatar', () => {
-  it('loads the API pointer with auth and API base, then revokes its object URL', async () => {
-    vi.resetModules();
-    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.test');
-    storeSession();
-    const blob = new Blob(['avatar'], { type: 'image/png' });
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      blob: vi.fn().mockResolvedValue(blob),
-    });
+describe('EmployeeBadge display boundary', () => {
+  it('uses only the caller-resolved avatar URL', () => {
+    const fetchMock = vi.fn(() => new Promise(() => undefined));
     vi.stubGlobal('fetch', fetchMock);
-    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:employee-avatar');
-    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
 
-    const view = await renderBadge();
+    const view = render(
+      <EmployeeBadge employee={employee} avatarUrl="blob:employee-avatar" />,
+    );
 
-    expect(screen.getByLabelText('林员工头像')).toHaveProperty('textContent', '林');
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        `https://api.example.test${avatarPointer}`,
-        { headers: { Authorization: 'Bearer session-secret' } },
-      );
-      expect(createObjectURL).toHaveBeenCalledWith(blob);
-      expect(view.container.querySelector('img')?.getAttribute('src')).toBe('blob:employee-avatar');
-    });
-    expect(view.container.innerHTML).not.toContain('session-secret');
+    expect(view.container.querySelector('img')?.getAttribute('src')).toBe('blob:employee-avatar');
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(view.container.innerHTML).not.toContain(avatarPointer);
-
-    view.unmount();
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:employee-avatar');
   });
 
-  it('keeps initials when the protected avatar cannot be loaded', async () => {
-    vi.resetModules();
-    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.test');
-    storeSession();
-    const fetchMock = vi.fn().mockRejectedValue(new Error('avatar unavailable'));
+  it('renders initials when the caller supplies no resolved avatar', () => {
+    const fetchMock = vi.fn(() => new Promise(() => undefined));
     vi.stubGlobal('fetch', fetchMock);
-    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:unexpected');
 
-    const view = await renderBadge();
+    const view = render(<EmployeeBadge employee={employee} avatarUrl={null} />);
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(screen.getByLabelText('林员工头像')).toHaveProperty('textContent', '林');
     expect(view.container.querySelector('img')).toBeNull();
-    expect(view.container.innerHTML).not.toContain('session-secret');
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(view.container.innerHTML).not.toContain(avatarPointer);
   });
 });

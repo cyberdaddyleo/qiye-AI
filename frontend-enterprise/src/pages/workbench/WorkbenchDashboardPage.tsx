@@ -28,7 +28,7 @@ import type {
 import WorkbenchLayout from './WorkbenchLayout';
 import { workbenchApi } from './workbenchApi';
 import { formatWorkload, projectProgress, taskStatusLabel } from './workbenchModel';
-import EmployeeBadge from './components/EmployeeBadge';
+import EmployeeBadgeContainer from './components/EmployeeBadgeContainer';
 import WorkbenchKpi from './components/WorkbenchKpi';
 import WorkloadBar from './components/WorkloadBar';
 
@@ -379,7 +379,7 @@ function TaskRow({ task, employee, risk = false }: { task: TaskRead; employee?: 
           {risk && task.due_date ? `截止 ${task.due_date} · 已逾期` : taskStatusLabel(task.status)}
         </span>
       </span>
-      <EmployeeBadge employee={employee} userId={task.assignee_user_id || undefined} compact subtitle={null} />
+      <EmployeeBadgeContainer employee={employee} userId={task.assignee_user_id || undefined} compact subtitle={null} />
     </Link>
   );
 }
@@ -398,7 +398,7 @@ function WorkloadRowView({
     : row.user_id;
   return (
     <div className="grid min-w-0 gap-[10px] rounded-[12px] border border-[#edf0f5] px-[14px] py-[12px] sm:grid-cols-[minmax(130px,0.75fr)_minmax(180px,1.25fr)] sm:items-center">
-      <EmployeeBadge employee={employee} userId={row.user_id} name={fallbackName} compact />
+      <EmployeeBadgeContainer employee={employee} userId={row.user_id} name={fallbackName} compact />
       <WorkloadBar
         value={row.capacity_percent}
         detail={`负载 ${formatWorkload(row)} · ${row.active_task_count} 项进行中`}

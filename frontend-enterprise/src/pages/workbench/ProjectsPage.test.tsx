@@ -212,6 +212,28 @@ describe('ProjectsPage', () => {
     });
   });
 
+  it('shows member projects when both restricted directories return their expected 403', async () => {
+    vi.mocked(workbenchApi.listDepartments).mockRejectedValue(
+      new ApiError(403, '{"detail":"Cannot view departments"}', 'Forbidden'),
+    );
+    vi.mocked(workbenchApi.listEmployees).mockRejectedValue(
+      new ApiError(403, '{"detail":"Cannot list employees"}', 'Forbidden'),
+    );
+
+    renderProjects({
+      id: 'user-member',
+      tenant_id: 'tenant-demo',
+      username: 'member',
+      display_name: '普通成员',
+      role: 'member',
+    });
+
+    const card = await screen.findByRole('article', { name: '产品发布' });
+    expect(within(card).getByText('部门信息受限')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('button', { name: '新建项目' })).toBeNull();
+  });
+
   it.each([
     {
       label: 'administrator employee directory',

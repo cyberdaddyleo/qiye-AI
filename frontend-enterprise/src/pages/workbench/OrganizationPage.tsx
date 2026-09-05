@@ -40,7 +40,7 @@ import type {
 
 import WorkbenchLayout from './WorkbenchLayout';
 import { workbenchApi } from './workbenchApi';
-import EmployeeBadge from './components/EmployeeBadge';
+import EmployeeBadgeContainer from './components/EmployeeBadgeContainer';
 import WorkloadBar from './components/WorkloadBar';
 
 export type OrganizationPageProps = {
@@ -322,7 +322,7 @@ export default function OrganizationPage({
       title: '真人员工',
       width: 190,
       render: (employee) => (
-        <EmployeeBadge employee={employee} subtitle={employee.employee_no || '未设置工号'} />
+        <EmployeeBadgeContainer employee={employee} subtitle={employee.employee_no || '未设置工号'} />
       ),
     },
     {
