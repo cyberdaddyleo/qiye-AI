@@ -108,7 +108,7 @@ const newEmployee: EmployeeRead = {
   display_name: '新增成员',
   employee_no: 'E009',
   job_title: '增长运营',
-  business_role: 'manager',
+  business_role: 'member',
   skills: ['增长', '数据分析'],
   capacity_percent: 75,
   daily_cost: 900,
@@ -253,7 +253,6 @@ describe('OrganizationPage', () => {
     await user.type(within(dialog).getByLabelText('员工工号'), 'E009');
     await user.type(within(dialog).getByLabelText('岗位'), '增长运营');
     await user.selectOptions(within(dialog).getByLabelText('所属部门'), department.id);
-    await user.selectOptions(within(dialog).getByLabelText('业务角色'), 'manager');
     await user.type(within(dialog).getByLabelText('职级'), 'P5');
     await user.type(within(dialog).getByLabelText('技能（逗号分隔）'), '增长，数据分析');
     await user.clear(within(dialog).getByLabelText('可用率'));
@@ -267,7 +266,7 @@ describe('OrganizationPage', () => {
       employee_no: 'E009',
       department_id: department.id,
       job_title: '增长运营',
-      business_role: 'manager',
+      business_role: 'member',
       level: 'P5',
       skills: ['增长', '数据分析'],
       capacity_percent: 75,
@@ -324,28 +323,54 @@ describe('OrganizationPage', () => {
 
   it('appoints a real department manager and reloads departments, employees, and access', async () => {
     const appointedDepartment = { ...department, manager_user_id: employee.user_id };
-    const appointedEmployee = { ...employee, business_role: 'manager' as const };
-    vi.mocked(workbenchApi.updateEmployee).mockResolvedValueOnce(appointedEmployee);
+    const existingManager = {
+      ...employee,
+      id: 'employee-existing-manager',
+      user_id: 'user-existing-manager',
+      username: 'existing.manager',
+      display_name: '现任经理',
+      business_role: 'manager' as const,
+    };
+    const ceoCandidate = {
+      ...employee,
+      id: 'employee-ceo-candidate',
+      user_id: 'user-ceo-candidate',
+      username: 'ceo.candidate',
+      display_name: 'CEO 候选人',
+      business_role: 'ceo' as const,
+    };
+    const legacyAdminCandidate = {
+      ...employee,
+      id: 'employee-legacy-admin',
+      user_id: 'user-legacy-admin',
+      username: 'legacy.admin',
+      display_name: '历史管理员',
+      business_role: 'admin' as const,
+    };
     vi.mocked(workbenchApi.updateDepartment).mockResolvedValueOnce(appointedDepartment);
     vi.mocked(workbenchApi.listDepartments)
       .mockResolvedValueOnce([department])
       .mockResolvedValueOnce([appointedDepartment]);
     vi.mocked(workbenchApi.listEmployees)
-      .mockResolvedValueOnce([employee])
-      .mockResolvedValueOnce([appointedEmployee]);
+      .mockResolvedValueOnce([employee, existingManager, ceoCandidate, legacyAdminCandidate, inactiveEmployee])
+      .mockResolvedValueOnce([employee, existingManager, ceoCandidate, legacyAdminCandidate, inactiveEmployee]);
     const user = userEvent.setup();
     renderOrganization();
     await screen.findByText('林珊');
 
     await user.click(screen.getByRole('button', { name: '任命产品部负责人' }));
     const dialog = await screen.findByRole('dialog', { name: '任命部门负责人' });
-    await user.selectOptions(within(dialog).getByLabelText('部门负责人'), employee.user_id);
+    const managerSelect = within(dialog).getByLabelText('部门负责人');
+    expect(within(managerSelect).getByRole('option', { name: /林珊/ })).toBeTruthy();
+    expect(within(managerSelect).getByRole('option', { name: /现任经理/ })).toBeTruthy();
+    expect(within(managerSelect).queryByRole('option', { name: /CEO 候选人/ })).toBeNull();
+    expect(within(managerSelect).queryByRole('option', { name: /历史管理员/ })).toBeNull();
+    expect(within(managerSelect).queryByRole('option', { name: /离职员工/ })).toBeNull();
+    await user.selectOptions(managerSelect, employee.user_id);
     await user.click(within(dialog).getByRole('button', { name: '确认任命' }));
 
-    expect(workbenchApi.updateEmployee).toHaveBeenCalledWith(employee.id, {
-      tenant_id: admin.tenant_id,
-      business_role: 'manager',
-    });
+    expect(workbenchApi.updateEmployee).not.toHaveBeenCalled();
+    expect(workbenchApi.updateDepartment).toHaveBeenCalledTimes(1);
     expect(workbenchApi.updateDepartment).toHaveBeenCalledWith(department.id, {
       tenant_id: admin.tenant_id,
       manager_user_id: employee.user_id,
@@ -358,19 +383,51 @@ describe('OrganizationPage', () => {
     expect(screen.getByText('负责人：林珊')).toBeTruthy();
   });
 
-  it('never offers account administrator as an employee business role', async () => {
+  it('refreshes authoritative organization state after a rejected manager appointment', async () => {
+    vi.mocked(workbenchApi.updateDepartment).mockRejectedValueOnce(
+      new ApiError(422, JSON.stringify({ detail: 'manager must belong to department' }), 'Unprocessable Entity'),
+    );
+    const user = userEvent.setup();
+    renderOrganization();
+    await screen.findByText('林珊');
+
+    await user.click(screen.getByRole('button', { name: '任命产品部负责人' }));
+    const dialog = await screen.findByRole('dialog', { name: '任命部门负责人' });
+    await user.selectOptions(within(dialog).getByLabelText('部门负责人'), employee.user_id);
+    await user.click(within(dialog).getByRole('button', { name: '确认任命' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveProperty(
+      'textContent',
+      '所选员工不符合部门负责人任命条件。',
+    );
+    expect(workbenchApi.updateDepartment).toHaveBeenCalledTimes(1);
+    expect(workbenchApi.updateDepartment).toHaveBeenCalledWith(department.id, {
+      tenant_id: admin.tenant_id,
+      manager_user_id: employee.user_id,
+    });
+    expect(workbenchApi.updateEmployee).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(workbenchApi.listDepartments).toHaveBeenCalledTimes(2);
+      expect(workbenchApi.listEmployees).toHaveBeenCalledTimes(2);
+      expect(workbenchApi.getAccess).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('offers only member and global CEO choices in employee business-role selectors', async () => {
     const user = userEvent.setup();
     renderOrganization();
     await screen.findByText('林珊');
 
     await user.click(screen.getByRole('button', { name: '编辑林珊' }));
     const editor = await screen.findByRole('dialog', { name: '编辑员工：林珊' });
-    expect(within(within(editor).getByLabelText('业务角色')).queryByRole('option', { name: '管理员' })).toBeNull();
+    expect(Array.from(within(editor).getByLabelText<HTMLSelectElement>('业务角色').options).map((option) => option.value))
+      .toEqual(['member', 'ceo']);
     await user.click(within(editor).getByRole('button', { name: '取消' }));
 
     await user.click(screen.getByRole('button', { name: '手工建档' }));
     const creator = await screen.findByRole('dialog', { name: '手工创建员工档案' });
-    expect(within(within(creator).getByLabelText('业务角色')).queryByRole('option', { name: '管理员' })).toBeNull();
+    expect(Array.from(within(creator).getByLabelText<HTMLSelectElement>('业务角色').options).map((option) => option.value))
+      .toEqual(['member', 'ceo']);
   });
 
   it('edits a real employee and binds an existing AI assistant as a capability', async () => {
@@ -520,6 +577,12 @@ describe('OrganizationPage', () => {
     expect(screen.queryByRole('button', { name: '导入员工' })).toBeNull();
     expect(screen.queryByLabelText('部门负责人管理')).toBeNull();
     expect(workbenchApi.listTenantUsers).not.toHaveBeenCalled();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: '编辑林珊' }));
+    const editor = await screen.findByRole('dialog', { name: '编辑员工：林珊' });
+    expect(Array.from(within(editor).getByLabelText<HTMLSelectElement>('业务角色').options).map((option) => option.value))
+      .toEqual(['member']);
   });
 
   it('shows a permission-denied state without organization mutations', async () => {

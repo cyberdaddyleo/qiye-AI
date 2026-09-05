@@ -537,6 +537,29 @@ describe('TasksPage', () => {
     });
   });
 
+  it('localizes artifact-reference labels and placeholders for assistive technology', async () => {
+    const localized = task('in_progress', 'task-artifact-i18n', 'English artifact task');
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(memberAccess);
+    vi.mocked(workbenchApi.listEmployees).mockRejectedValue(
+      new ApiError(403, '{"detail":"Cannot list employees"}', 'Forbidden'),
+    );
+    vi.mocked(workbenchApi.listTasks).mockResolvedValue([localized]);
+    vi.mocked(workbenchApi.getTask).mockResolvedValue(localized);
+    window.localStorage.setItem('staffdeck_locale', 'en-US');
+    const user = userEvent.setup();
+    renderTasks(member);
+
+    const taskTitle = await screen.findByText(localized.title);
+    const taskButton = taskTitle.closest('button');
+    expect(taskButton).toBeTruthy();
+    await user.click(taskButton!);
+
+    const reference = await screen.findByLabelText('Deliverable reference 1');
+    expect(reference.hasAttribute('data-i18n-ignore')).toBe(false);
+    expect(reference.getAttribute('aria-label')).toBe('Deliverable reference 1');
+    expect(reference.getAttribute('placeholder')).toBe('https://… or resource ID');
+  });
+
   it.each(['review', 'done', 'canceled'] as const)('does not expose execution mutations for %s tasks', async (status) => {
     const immutable = task(status, `task-no-execute-${status}`, `${status} 不可执行`);
     vi.mocked(workbenchApi.getAccess).mockResolvedValue(memberAccess);

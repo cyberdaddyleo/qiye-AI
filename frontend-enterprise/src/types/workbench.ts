@@ -1,5 +1,5 @@
 export type BusinessRole = 'admin' | 'ceo' | 'manager' | 'member';
-export type AssignableBusinessRole = Exclude<BusinessRole, 'admin'>;
+export type AssignableBusinessRole = Exclude<BusinessRole, 'admin' | 'manager'>;
 export type WorkbenchDirectoryScope = 'all' | 'department' | 'self';
 export type DepartmentStatus = 'active' | 'archived';
 export type EmployeeStatus = 'active' | 'inactive';

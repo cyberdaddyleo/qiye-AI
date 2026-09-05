@@ -366,7 +366,7 @@ export default function TaskDetailSheet({
                       <div key={index} className="flex items-end gap-[6px]">
                         <label className="grid min-w-0 flex-1 gap-[4px]">
                           <span className="sr-only">成果引用 {index + 1}</span>
-                          <Input aria-label={`成果引用 ${index + 1}`} value={reference} onChange={(event) => changeArtifactRef(index, event.target.value)} placeholder="https://… 或资源 ID" className="h-[33px] rounded-[8px] border-[#e3e7f1] text-[11px]" data-i18n-ignore />
+                          <Input aria-label={`成果引用 ${index + 1}`} value={reference} onChange={(event) => changeArtifactRef(index, event.target.value)} placeholder="https://… 或资源 ID" className="h-[33px] rounded-[8px] border-[#e3e7f1] text-[11px]" />
                         </label>
                         {artifactRefs.length > 1 && <Button type="button" variant="ghost" aria-label={`移除成果引用 ${index + 1}`} disabled={busy} onClick={() => removeArtifactRef(index)} className="size-[33px] rounded-[8px] p-0 text-[#9aa1b3]"><X className="size-[12px]" aria-hidden="true" /></Button>}
                       </div>

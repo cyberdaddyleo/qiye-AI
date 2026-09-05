@@ -265,6 +265,17 @@ describe('typed workbench API boundary', () => {
       // @ts-expect-error system administration belongs to the account layer.
       business_role: 'admin',
     };
+    const invalidManagerCreate: EmployeeCreateRequest = {
+      tenant_id: 'tenant_a',
+      user_id: 'user-2',
+      // @ts-expect-error department management is assigned only through the department endpoint.
+      business_role: 'manager',
+    };
+    const invalidManagerUpdate: EmployeeUpdateRequest = {
+      tenant_id: 'tenant_a',
+      // @ts-expect-error department management is assigned only through the department endpoint.
+      business_role: 'manager',
+    };
     // @ts-expect-error every result submission must carry auditable references.
     const invalidSubmission: TaskSubmitRequest = {
       tenant_id: 'tenant_a',
@@ -272,8 +283,13 @@ describe('typed workbench API boundary', () => {
       result_summary: 'Delivered',
     };
 
-    expect([invalidCreate.business_role, invalidUpdate.business_role, invalidSubmission.result_summary])
-      .toEqual(['admin', 'admin', 'Delivered']);
+    expect([
+      invalidCreate.business_role,
+      invalidUpdate.business_role,
+      invalidManagerCreate.business_role,
+      invalidManagerUpdate.business_role,
+      invalidSubmission.result_summary,
+    ]).toEqual(['admin', 'admin', 'manager', 'manager', 'Delivered']);
   });
 
   it('targets the existing JSON endpoints with exact methods and field names', async () => {

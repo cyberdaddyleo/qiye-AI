@@ -101,7 +101,7 @@ function employeeForm(employee: EmployeeRead): EmployeeForm {
     employeeNo: employee.employee_no || '',
     departmentId: employee.department_id || '',
     jobTitle: employee.job_title || '',
-    businessRole: employee.business_role === 'admin' ? 'member' : employee.business_role,
+    businessRole: employee.business_role === 'ceo' ? 'ceo' : 'member',
     level: employee.level || '',
     skills: employee.skills.join('，'),
     capacityPercent: String(employee.capacity_percent),
@@ -239,6 +239,7 @@ export default function OrganizationPage({
     () => employees.filter((employee) => (
       employee.status === 'active'
       && employee.department_id === managerDepartment?.id
+      && (employee.business_role === 'member' || employee.business_role === 'manager')
     )),
     [employees, managerDepartment?.id],
   );
@@ -344,19 +345,18 @@ export default function OrganizationPage({
       return;
     }
     const candidate = employees.find((employee) => employee.user_id === managerUserId);
-    if (!candidate || candidate.status !== 'active' || candidate.department_id !== managerDepartment.id) {
+    if (
+      !candidate
+      || candidate.status !== 'active'
+      || candidate.department_id !== managerDepartment.id
+      || (candidate.business_role !== 'member' && candidate.business_role !== 'manager')
+    ) {
       setManagerError('所选员工已不在当前部门，请刷新后重试。');
       return;
     }
     setManagerSaving(true);
     setManagerError('');
     try {
-      if (candidate.business_role === 'member') {
-        await workbenchApi.updateEmployee(candidate.id, {
-          tenant_id: currentUser.tenant_id,
-          business_role: 'manager',
-        });
-      }
       await workbenchApi.updateDepartment(managerDepartment.id, {
         tenant_id: currentUser.tenant_id,
         manager_user_id: candidate.user_id,
@@ -638,7 +638,7 @@ export default function OrganizationPage({
             <section aria-label="部门负责人管理" className="rounded-[16px] border border-[#edf0f5] bg-white p-[16px] shadow-[0_8px_24px_rgba(24,30,46,0.035)]">
               <div>
                 <h2 className="m-0 text-[15px] font-semibold text-[#24262d]">部门负责人</h2>
-                <p className="mt-[4px] mb-0 text-[11px] text-[#858b9c]">任命会同步业务角色，并以部门记录作为真实权限来源。</p>
+                <p className="mt-[4px] mb-0 text-[11px] text-[#858b9c]">部门任命是负责人权限的唯一来源，不会改写员工业务角色。</p>
               </div>
               {activeDepartments.length ? (
                 <div className="mt-[13px] grid gap-[10px] sm:grid-cols-2 xl:grid-cols-3">
@@ -709,6 +709,7 @@ export default function OrganizationPage({
         departments={activeDepartments}
         employees={employees}
         assistants={visibleAssistants}
+        canAssignCeo={canManageAll}
         loadingCandidates={tenantUsersLoading}
         candidateError={tenantUsersError}
         saving={employeeCreating}
@@ -813,6 +814,7 @@ function CreateEmployeeDialog({
   departments,
   employees,
   assistants,
+  canAssignCeo,
   loadingCandidates,
   candidateError,
   saving,
@@ -828,6 +830,7 @@ function CreateEmployeeDialog({
   departments: DepartmentRead[];
   employees: EmployeeRead[];
   assistants: AgentProfileRead[];
+  canAssignCeo: boolean;
   loadingCandidates: boolean;
   candidateError: string;
   saving: boolean;
@@ -871,7 +874,7 @@ function CreateEmployeeDialog({
             <Field label="员工工号"><Input value={form.employeeNo} onChange={(event) => set('employeeNo', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
             <Field label="岗位"><Input value={form.jobTitle} onChange={(event) => set('jobTitle', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
             <Field label="所属部门"><NativeSelect value={form.departmentId} onChange={(value) => set('departmentId', value)}><option value="">未分配</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</NativeSelect></Field>
-            <Field label="业务角色"><NativeSelect value={form.businessRole} onChange={(value) => set('businessRole', value as AssignableBusinessRole)}><option value="member">普通员工</option><option value="manager">部门负责人</option><option value="ceo">CEO</option></NativeSelect></Field>
+            <Field label="业务角色"><NativeSelect value={form.businessRole} onChange={(value) => set('businessRole', value as AssignableBusinessRole)}><option value="member">普通员工</option>{canAssignCeo && <option value="ceo">CEO</option>}</NativeSelect></Field>
             <Field label="职级"><Input value={form.level} onChange={(event) => set('level', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
             <Field label="技能（逗号分隔）"><Input value={form.skills} onChange={(event) => set('skills', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
             <Field label="可用率"><Input type="number" min="0" max="100" value={form.capacityPercent} onChange={(event) => set('capacityPercent', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
@@ -975,7 +978,7 @@ function EmployeeEditor({
               <Field label="岗位"><Input value={form.jobTitle} onChange={(event) => set('jobTitle', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
               <Field label="所属部门"><NativeSelect value={form.departmentId} onChange={(value) => set('departmentId', value)}><option value="">未分配</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</NativeSelect></Field>
               <Field label="职级"><Input value={form.level} onChange={(event) => set('level', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
-              <Field label="业务角色"><NativeSelect value={form.businessRole} onChange={(value) => set('businessRole', value as AssignableBusinessRole)}><option value="member">普通员工</option><option value="manager">部门负责人</option>{canAssignCeo && <option value="ceo">CEO</option>}</NativeSelect></Field>
+              <Field label="业务角色"><NativeSelect value={form.businessRole} onChange={(value) => set('businessRole', value as AssignableBusinessRole)}><option value="member">普通员工</option>{canAssignCeo && <option value="ceo">CEO</option>}</NativeSelect></Field>
               <Field label="状态"><NativeSelect value={form.status} onChange={(value) => set('status', value as EmployeeStatus)}><option value="active">在岗</option><option value="inactive">停用</option></NativeSelect></Field>
               <Field label="技能（逗号分隔）"><Input value={form.skills} onChange={(event) => set('skills', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
               <Field label="可用率"><Input type="number" min="0" max="100" value={form.capacityPercent} onChange={(event) => set('capacityPercent', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
