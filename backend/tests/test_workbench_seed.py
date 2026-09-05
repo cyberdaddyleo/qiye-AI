@@ -16,10 +16,14 @@ from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db.models import (
+    AgentProfile,
     ChatSession,
     Department,
     EmployeeProfile,
+    KnowledgeBase,
     ModelConfig,
+    PersonaConfig,
+    Skill,
     Tenant,
     User,
     WorkPlan,
@@ -28,7 +32,7 @@ from app.db.models import (
     WorkTaskDependency,
     WorkTaskEvent,
 )
-from app.db.seed import seed_demo_data
+from app.db.seed import DEFAULT_PERSONA_PROMPT, seed_demo_data
 from app.db.workbench_seed import (
     acquire_quantxy_seed_transaction_lock,
     seed_quantxy_workbench,
@@ -107,7 +111,15 @@ def _model_ids(db: Session, model: type) -> tuple[str, ...]:
 
 
 def _add_pristine_demo_identities(db: Session) -> None:
-    db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
+    db.add_all(
+        [
+            Tenant(id="tenant_demo", name="Demo Enterprise"),
+            PersonaConfig(
+                tenant_id="tenant_demo",
+                system_prompt=DEFAULT_PERSONA_PROMPT,
+            ),
+        ]
+    )
     db.add_all(
         [
             User(
@@ -401,14 +413,10 @@ def test_demo_seed_serializes_two_spawned_processes_on_one_wal_database(
         assert set(_model_ids(db, WorkTask)) == EXPECTED_TASK_IDS
         assert len(_model_ids(db, WorkTaskDependency)) == len(EXPECTED_DEPENDENCIES)
         assert set(_model_ids(db, WorkTaskEvent)) == {
-            event_id
-            for event_ids in EXPECTED_TASK_EVENT_IDS.values()
-            for event_id in event_ids
+            event_id for event_ids in EXPECTED_TASK_EVENT_IDS.values() for event_id in event_ids
         }
     verification_engine.dispose()
-    assert database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    ).is_file()
+    assert database_path.with_name(f"{database_path.name}.quantxy-seed.lock").is_file()
 
 
 def test_demo_seed_serializes_spawned_processes_using_real_and_symlink_urls(
@@ -467,18 +475,12 @@ def test_demo_seed_serializes_spawned_processes_using_real_and_symlink_urls(
         assert set(_model_ids(db, WorkTask)) == EXPECTED_TASK_IDS
         assert len(_model_ids(db, WorkTaskDependency)) == len(EXPECTED_DEPENDENCIES)
         assert set(_model_ids(db, WorkTaskEvent)) == {
-            event_id
-            for event_ids in EXPECTED_TASK_EVENT_IDS.values()
-            for event_id in event_ids
+            event_id for event_ids in EXPECTED_TASK_EVENT_IDS.values() for event_id in event_ids
         }
     verification_engine.dispose()
 
-    canonical_lock_path = database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    )
-    symlink_lock_path = symlink_path.with_name(
-        f"{symlink_path.name}.quantxy-seed.lock"
-    )
+    canonical_lock_path = database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
+    symlink_lock_path = symlink_path.with_name(f"{symlink_path.name}.quantxy-seed.lock")
     assert canonical_lock_path.is_file()
     assert not symlink_lock_path.exists()
 
@@ -492,9 +494,7 @@ def test_sqlite_seed_lock_uses_the_url_database_not_its_query(tmp_path: Path) ->
         acquire_quantxy_seed_transaction_lock(db)
         db.rollback()
 
-    expected_lock_path = database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    )
+    expected_lock_path = database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
     assert expected_lock_path.is_file()
     assert list(tmp_path.glob("*.quantxy-seed.lock")) == [expected_lock_path]
     engine.dispose()
@@ -519,12 +519,8 @@ def test_sqlite_seed_lock_uses_sqlites_identity_for_literal_percent_paths(
 
     database_path = tmp_path / "literal%20identity.db"
     ordinary_url = f"sqlite:///{database_path}"
-    sqlite_uri_url = (
-        f"sqlite:///file:{str(database_path).replace('%', '%25')}?uri=true"
-    )
-    expected_lock_path = database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    )
+    sqlite_uri_url = f"sqlite:///file:{str(database_path).replace('%', '%25')}?uri=true"
+    expected_lock_path = database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
     engines = [create_engine(ordinary_url), create_engine(sqlite_uri_url)]
     try:
         lock_paths = []
@@ -554,9 +550,7 @@ def test_sqlite_seed_lock_treats_memory_syntax_according_to_sqlite_uri_mode(
             with Session(engine) as db:
                 assert workbench_seed._sqlite_seed_lock_path(
                     db
-                ) == database_path.resolve().with_name(
-                    f"{database_path.name}.quantxy-seed.lock"
-                )
+                ) == database_path.resolve().with_name(f"{database_path.name}.quantxy-seed.lock")
         finally:
             engine.dispose()
 
@@ -579,9 +573,7 @@ def test_sqlite_seed_lock_ignores_uri_fragments_in_physical_identity(
     from app.db import workbench_seed
 
     database_path = tmp_path / "fragment-identity.db"
-    expected_lock_path = database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    )
+    expected_lock_path = database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
     engines = [
         create_engine(f"sqlite:///file:{database_path}#{fragment}?uri=true")
         for fragment in ("first", "second")
@@ -613,9 +605,7 @@ def test_sqlite_seed_lock_follows_an_existing_relative_engine_connection(
     try:
         cursor = raw_connection.cursor()
         cursor.execute("PRAGMA database_list")
-        sqlite_filename = next(
-            row[2] for row in cursor.fetchall() if row[1] == "main"
-        )
+        sqlite_filename = next(row[2] for row in cursor.fetchall() if row[1] == "main")
         cursor.close()
     finally:
         raw_connection.close()
@@ -623,15 +613,14 @@ def test_sqlite_seed_lock_follows_an_existing_relative_engine_connection(
     monkeypatch.chdir(later_directory)
     try:
         with Session(engine) as db:
-            assert workbench_seed._sqlite_seed_lock_path(
-                db
-            ) == (original_directory / "relative-identity.db").resolve().with_name(
-                "relative-identity.db.quantxy-seed.lock"
-            )
+            assert workbench_seed._sqlite_seed_lock_path(db) == (
+                original_directory / "relative-identity.db"
+            ).resolve().with_name("relative-identity.db.quantxy-seed.lock")
             assert not db.in_transaction()
-        assert Path(sqlite_filename).resolve() == (
-            original_directory / "relative-identity.db"
-        ).resolve()
+        assert (
+            Path(sqlite_filename).resolve()
+            == (original_directory / "relative-identity.db").resolve()
+        )
     finally:
         engine.dispose()
 
@@ -642,9 +631,7 @@ def test_sqlite_lock_identity_probe_does_not_start_sqlalchemy_transactions(
     from app.db import workbench_seed
 
     database_path = tmp_path / "transaction-free-probe.db"
-    expected_lock_path = database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    )
+    expected_lock_path = database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
     engine = create_engine(f"sqlite:///{database_path}")
     try:
         with Session(engine) as db:
@@ -734,15 +721,11 @@ def test_demo_seed_serializes_plain_and_driver_urls_with_queries(
         assert set(_model_ids(db, WorkTask)) == EXPECTED_TASK_IDS
         assert len(_model_ids(db, WorkTaskDependency)) == len(EXPECTED_DEPENDENCIES)
         assert set(_model_ids(db, WorkTaskEvent)) == {
-            event_id
-            for event_ids in EXPECTED_TASK_EVENT_IDS.values()
-            for event_id in event_ids
+            event_id for event_ids in EXPECTED_TASK_EVENT_IDS.values() for event_id in event_ids
         }
     verification_engine.dispose()
 
-    canonical_lock_path = database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    )
+    canonical_lock_path = database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
     assert canonical_lock_path.is_file()
     assert list(tmp_path.glob("*.quantxy-seed.lock")) == [canonical_lock_path]
 
@@ -754,8 +737,7 @@ def test_demo_seed_serializes_literal_percent_and_equivalent_uri_urls(
     database_path = tmp_path / "weird%20multiprocess.db"
     ordinary_url = f"sqlite:///{database_path}?timeout=0.001"
     sqlite_uri_url = (
-        f"sqlite:///file:{str(database_path).replace('%', '%25')}"
-        "?timeout=0.001&uri=true"
+        f"sqlite:///file:{str(database_path).replace('%', '%25')}?timeout=0.001&uri=true"
     )
     data_dir = tmp_path / "weird-url-data"
     monkeypatch.setenv("DATABASE_URL", ordinary_url)
@@ -803,15 +785,11 @@ def test_demo_seed_serializes_literal_percent_and_equivalent_uri_urls(
         assert set(_model_ids(db, WorkTask)) == EXPECTED_TASK_IDS
         assert len(_model_ids(db, WorkTaskDependency)) == len(EXPECTED_DEPENDENCIES)
         assert set(_model_ids(db, WorkTaskEvent)) == {
-            event_id
-            for event_ids in EXPECTED_TASK_EVENT_IDS.values()
-            for event_id in event_ids
+            event_id for event_ids in EXPECTED_TASK_EVENT_IDS.values() for event_id in event_ids
         }
     verification_engine.dispose()
 
-    canonical_lock_path = database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    )
+    canonical_lock_path = database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
     assert canonical_lock_path.is_file()
     assert list(tmp_path.glob("*.quantxy-seed.lock")) == [canonical_lock_path]
 
@@ -845,25 +823,7 @@ def test_sqlite_seed_lock_releases_after_failed_session_cleanup(
 
         setup_engine = create_engine(database_url)
         with Session(setup_engine) as db:
-            db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
-            db.add_all(
-                [
-                    User(
-                        id="admin",
-                        tenant_id="tenant_demo",
-                        username="admin",
-                        role="admin",
-                        password_hash="admin-hash",
-                    ),
-                    User(
-                        id="user_demo",
-                        tenant_id="tenant_demo",
-                        username="user_demo",
-                        password_hash="demo-hash",
-                    ),
-                ]
-            )
-            db.commit()
+            _add_pristine_demo_identities(db)
         setup_engine.dispose()
 
         contender = context.Process(
@@ -885,9 +845,7 @@ def test_sqlite_seed_lock_releases_after_failed_session_cleanup(
         results.join_thread()
 
     assert holder.exitcode == 0
-    assert database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    ).is_file()
+    assert database_path.with_name(f"{database_path.name}.quantxy-seed.lock").is_file()
 
 
 def test_sqlite_seed_lock_closes_file_and_thread_lock_when_acquisition_fails(
@@ -1020,27 +978,7 @@ def test_quantxy_workbench_seed_serializes_two_real_sessions(tmp_path: Path) -> 
     )
     SQLModel.metadata.create_all(engine)
     with Session(engine) as db:
-        db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
-        db.add_all(
-            [
-                User(
-                    id="admin",
-                    tenant_id="tenant_demo",
-                    username="admin",
-                    display_name="Administrator",
-                    role="admin",
-                    password_hash="admin-hash",
-                ),
-                User(
-                    id="user_demo",
-                    tenant_id="tenant_demo",
-                    username="user_demo",
-                    display_name="Demo User",
-                    password_hash="demo-hash",
-                ),
-            ]
-        )
-        db.commit()
+        _add_pristine_demo_identities(db)
 
     start = Barrier(2)
 
@@ -1062,9 +1000,7 @@ def test_quantxy_workbench_seed_serializes_two_real_sessions(tmp_path: Path) -> 
         assert set(_model_ids(db, WorkTask)) == EXPECTED_TASK_IDS
         assert len(_model_ids(db, WorkTaskDependency)) == len(EXPECTED_DEPENDENCIES)
         assert set(_model_ids(db, WorkTaskEvent)) == {
-            event_id
-            for event_ids in EXPECTED_TASK_EVENT_IDS.values()
-            for event_id in event_ids
+            event_id for event_ids in EXPECTED_TASK_EVENT_IDS.values() for event_id in event_ids
         }
 
 
@@ -1104,9 +1040,7 @@ def test_quantxy_seed_rejects_an_empty_workbench_after_a_transaction_started(
             seed_quantxy_workbench(db)
         db.rollback()
 
-    assert not database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    ).exists()
+    assert not database_path.with_name(f"{database_path.name}.quantxy-seed.lock").exists()
     engine.dispose()
 
 
@@ -1140,17 +1074,18 @@ def test_quantxy_lock_rejects_an_external_connection_write_transaction(
                 name="External contract marker",
             )
         )
-        with Session(bind=connection) as db, pytest.raises(
-            RuntimeError,
-            match="seed transaction lock must be acquired before the Session starts",
+        with (
+            Session(bind=connection) as db,
+            pytest.raises(
+                RuntimeError,
+                match="seed transaction lock must be acquired before the Session starts",
+            ),
         ):
             acquire_quantxy_seed_transaction_lock(db)
         assert connection.in_transaction()
         transaction.rollback()
 
-    assert not database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    ).exists()
+    assert not database_path.with_name(f"{database_path.name}.quantxy-seed.lock").exists()
     engine.dispose()
 
 
@@ -1202,9 +1137,7 @@ def test_existing_workbench_is_a_noop_inside_an_external_connection_transaction(
         assert connection.in_transaction()
         transaction.rollback()
 
-    assert not database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    ).exists()
+    assert not database_path.with_name(f"{database_path.name}.quantxy-seed.lock").exists()
     with Session(engine) as db:
         assert _model_ids(db, Department) == ("user_owned_department",)
         assert _model_ids(db, EmployeeProfile) == ()
@@ -1219,25 +1152,7 @@ def test_existing_workbench_is_a_safe_noop_inside_a_preexisting_transaction(
     engine = create_engine(f"sqlite:///{tmp_path / 'existing-noop.db'}")
     SQLModel.metadata.create_all(engine)
     with Session(engine) as db:
-        db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
-        db.add_all(
-            [
-                User(
-                    id="admin",
-                    tenant_id="tenant_demo",
-                    username="admin",
-                    role="admin",
-                    password_hash="admin-hash",
-                ),
-                User(
-                    id="user_demo",
-                    tenant_id="tenant_demo",
-                    username="user_demo",
-                    password_hash="demo-hash",
-                ),
-            ]
-        )
-        db.commit()
+        _add_pristine_demo_identities(db)
         seed_quantxy_workbench(db)
         db.commit()
 
@@ -1264,25 +1179,7 @@ def test_prewritten_transaction_fails_fast_without_deadlocking_normal_seed(
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA journal_mode=WAL")).scalar_one() == "wal"
     with Session(engine) as db:
-        db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
-        db.add_all(
-            [
-                User(
-                    id="admin",
-                    tenant_id="tenant_demo",
-                    username="admin",
-                    role="admin",
-                    password_hash="admin-hash",
-                ),
-                User(
-                    id="user_demo",
-                    tenant_id="tenant_demo",
-                    username="user_demo",
-                    password_hash="demo-hash",
-                ),
-            ]
-        )
-        db.commit()
+        _add_pristine_demo_identities(db)
     engine.dispose()
 
     context = multiprocessing.get_context("spawn")
@@ -1340,25 +1237,7 @@ def test_external_connection_transaction_does_not_invert_the_seed_lock(
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA journal_mode=WAL")).scalar_one() == "wal"
     with Session(engine) as db:
-        db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
-        db.add_all(
-            [
-                User(
-                    id="admin",
-                    tenant_id="tenant_demo",
-                    username="admin",
-                    role="admin",
-                    password_hash="admin-hash",
-                ),
-                User(
-                    id="user_demo",
-                    tenant_id="tenant_demo",
-                    username="user_demo",
-                    password_hash="demo-hash",
-                ),
-            ]
-        )
-        db.commit()
+        _add_pristine_demo_identities(db)
     engine.dispose()
 
     context = multiprocessing.get_context("spawn")
@@ -1418,25 +1297,7 @@ def test_connection_bound_seed_cleanup_releases_transaction_and_lock_for_a_proce
     engine = create_engine(database_url)
     SQLModel.metadata.create_all(engine)
     with Session(engine) as db:
-        db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
-        db.add_all(
-            [
-                User(
-                    id="admin",
-                    tenant_id="tenant_demo",
-                    username="admin",
-                    role="admin",
-                    password_hash="admin-hash",
-                ),
-                User(
-                    id="user_demo",
-                    tenant_id="tenant_demo",
-                    username="user_demo",
-                    password_hash="demo-hash",
-                ),
-            ]
-        )
-        db.commit()
+        _add_pristine_demo_identities(db)
 
     with engine.connect() as connection:
         db = Session(bind=connection)
@@ -1468,9 +1329,7 @@ def test_connection_bound_seed_cleanup_releases_transaction_and_lock_for_a_proce
     with Session(engine) as db:
         assert _model_ids(db, Department) == tuple(sorted(EXPECTED_DEPARTMENTS))
         assert _model_ids(db, EmployeeProfile) == tuple(sorted(EXPECTED_EMPLOYEES))
-    assert database_path.with_name(
-        f"{database_path.name}.quantxy-seed.lock"
-    ).is_file()
+    assert database_path.with_name(f"{database_path.name}.quantxy-seed.lock").is_file()
     engine.dispose()
 
 
@@ -1478,29 +1337,12 @@ def test_quantxy_workbench_seed_does_not_commit_the_callers_transaction() -> Non
     engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(engine)
     with Session(engine) as db:
-        db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
-        db.add_all(
-            [
-                User(
-                    id="admin",
-                    tenant_id="tenant_demo",
-                    username="admin",
-                    role="admin",
-                    password_hash="admin-hash",
-                ),
-                User(
-                    id="user_demo",
-                    tenant_id="tenant_demo",
-                    username="user_demo",
-                    password_hash="demo-hash",
-                ),
-            ]
-        )
-        db.commit()
+        _add_pristine_demo_identities(db)
 
         acquire_quantxy_seed_transaction_lock(db)
-        db.add(Tenant(id="outer_transaction_marker", name="Outer transaction marker"))
+        db.exec(text("UPDATE tenants SET name = name WHERE id = 'tenant_demo'"))
         seed_quantxy_workbench(db)
+        db.add(Tenant(id="outer_transaction_marker", name="Outer transaction marker"))
         db.rollback()
 
     with Session(engine) as db:
@@ -1518,12 +1360,8 @@ def test_demo_seed_creates_an_idempotent_quantxy_workbench_with_real_users() -> 
     with Session(engine) as db:
         seed_demo_data(db)
 
-        departments = db.exec(
-            select(Department).where(Department.tenant_id == "tenant_demo")
-        ).all()
-        assert {
-            row.id: (row.name, row.code) for row in departments
-        } == EXPECTED_DEPARTMENTS
+        departments = db.exec(select(Department).where(Department.tenant_id == "tenant_demo")).all()
+        assert {row.id: (row.name, row.code) for row in departments} == EXPECTED_DEPARTMENTS
 
         employees = db.exec(
             select(EmployeeProfile).where(EmployeeProfile.tenant_id == "tenant_demo")
@@ -1547,9 +1385,7 @@ def test_demo_seed_creates_an_idempotent_quantxy_workbench_with_real_users() -> 
             "user_quantxy_finance_example",
         }
 
-        projects = db.exec(
-            select(WorkProject).where(WorkProject.tenant_id == "tenant_demo")
-        ).all()
+        projects = db.exec(select(WorkProject).where(WorkProject.tenant_id == "tenant_demo")).all()
         assert len(projects) == 1
         assert projects[0].id == "project_quantxy_delivery_example"
         assert "示例" in projects[0].name
@@ -1659,9 +1495,7 @@ def test_fresh_demo_seed_fallback_plan_dispatches_every_task_to_active_real_user
                 )
             ).all()
         )
-        tenant_user_ids = set(
-            db.exec(select(User.id).where(User.tenant_id == "tenant_demo")).all()
-        )
+        tenant_user_ids = set(db.exec(select(User.id).where(User.tenant_id == "tenant_demo")).all())
         assert dispatched_user_ids == expected_assignees
         assert dispatched_user_ids <= active_profile_user_ids
         assert dispatched_user_ids <= tenant_user_ids
@@ -1680,14 +1514,10 @@ def test_quantxy_seed_task_schedule_respects_dependencies_and_project_window() -
         assert project is not None
         tasks = {
             row.id: row
-            for row in db.exec(
-                select(WorkTask).where(WorkTask.tenant_id == "tenant_demo")
-            ).all()
+            for row in db.exec(select(WorkTask).where(WorkTask.tenant_id == "tenant_demo")).all()
         }
         dependencies = db.exec(
-            select(WorkTaskDependency).where(
-                WorkTaskDependency.tenant_id == "tenant_demo"
-            )
+            select(WorkTaskDependency).where(WorkTaskDependency.tenant_id == "tenant_demo")
         ).all()
 
         assert all(
@@ -1708,17 +1538,13 @@ def test_quantxy_seed_tasks_start_at_baseline_with_standard_stable_events() -> N
         seed_demo_data(db)
         tasks = {
             row.id: row
-            for row in db.exec(
-                select(WorkTask).where(WorkTask.tenant_id == "tenant_demo")
-            ).all()
+            for row in db.exec(select(WorkTask).where(WorkTask.tenant_id == "tenant_demo")).all()
         }
         events = db.exec(
             select(WorkTaskEvent).where(WorkTaskEvent.tenant_id == "tenant_demo")
         ).all()
 
-        assert {
-            task_id: (task.status, task.progress) for task_id, task in tasks.items()
-        } == {
+        assert {task_id: (task.status, task.progress) for task_id, task in tasks.items()} == {
             "task_quantxy_requirements_example": ("backlog", 0),
             "task_quantxy_technical_example": ("blocked", 0),
             "task_quantxy_delivery_example": ("blocked", 0),
@@ -1827,7 +1653,15 @@ def test_quantxy_workbench_seed_fails_closed_for_customized_demo_identities(
     with Session(engine) as db:
         admin_id = "company_admin" if customization == "custom_admin_id" else "admin"
         admin_name = "企业管理员" if customization == "custom_name" else "Administrator"
-        db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
+        db.add_all(
+            [
+                Tenant(id="tenant_demo", name="Demo Enterprise"),
+                PersonaConfig(
+                    tenant_id="tenant_demo",
+                    system_prompt=DEFAULT_PERSONA_PROMPT,
+                ),
+            ]
+        )
         db.add_all(
             [
                 User(
@@ -1942,13 +1776,10 @@ def test_quantxy_workbench_seed_fails_closed_for_existing_business_data(
         seed_quantxy_workbench(db)
         db.commit()
 
-        assert {
-            model: _model_ids(db, model)
-            for model in original_ids
-        } == original_ids
+        assert {model: _model_ids(db, model) for model in original_ids} == original_ids
 
 
-def test_quantxy_workbench_seed_upgrades_the_complete_pristine_demo_baseline() -> None:
+def test_quantxy_workbench_seed_fails_closed_after_other_demo_resources_exist() -> None:
     engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(engine)
 
@@ -1959,9 +1790,136 @@ def test_quantxy_workbench_seed_upgrades_the_complete_pristine_demo_baseline() -
         seed_quantxy_workbench(db)
         db.commit()
 
+        assert _model_ids(db, Department) == ()
+        assert _model_ids(db, EmployeeProfile) == ()
+        assert _model_ids(db, WorkProject) == ()
+
+
+@pytest.mark.parametrize(
+    "resource_kind",
+    ["model_config", "agent_profile", "knowledge_base", "skill"],
+)
+def test_quantxy_workbench_seed_fails_closed_for_custom_demo_resources(
+    resource_kind: str,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        _add_pristine_demo_identities(db)
+        resources = {
+            "model_config": ModelConfig(
+                id="model_user_owned",
+                tenant_id="tenant_demo",
+                name="用户模型",
+                api_key_encrypted="encrypted",
+                model="user-model",
+            ),
+            "agent_profile": AgentProfile(
+                id="agent_user_owned",
+                tenant_id="tenant_demo",
+                name="用户智能体",
+            ),
+            "knowledge_base": KnowledgeBase(
+                id="kb_user_owned",
+                tenant_id="tenant_demo",
+                name="用户知识库",
+            ),
+            "skill": Skill(
+                id="skill_user_owned",
+                tenant_id="tenant_demo",
+                skill_id="user-skill",
+                name="用户技能",
+                content_json={"goal": "custom"},
+            ),
+        }
+        resource = resources[resource_kind]
+        db.add(resource)
+        db.commit()
+
+        seed_quantxy_workbench(db)
+        db.commit()
+
+        assert db.get(type(resource), resource.id) is not None
+        assert _model_ids(db, User) == ("admin", "user_demo")
+        assert _model_ids(db, Department) == ()
+        assert _model_ids(db, EmployeeProfile) == ()
+        assert _model_ids(db, WorkProject) == ()
+
+
+@pytest.mark.parametrize("customization", ["missing", "content", "identity"])
+def test_quantxy_workbench_seed_requires_the_exact_default_persona(
+    customization: str,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        _add_pristine_demo_identities(db)
+        persona = db.get(PersonaConfig, "tenant_demo")
+        assert persona is not None
+        if customization == "content":
+            persona.system_prompt = "用户自定义 Persona"
+            db.add(persona)
+        else:
+            db.delete(persona)
+            if customization == "identity":
+                db.add(
+                    PersonaConfig(
+                        tenant_id="tenant_other",
+                        system_prompt=DEFAULT_PERSONA_PROMPT,
+                    )
+                )
+        db.commit()
+
+        seed_quantxy_workbench(db)
+        db.commit()
+
+        assert _model_ids(db, User) == ("admin", "user_demo")
+        assert _model_ids(db, Department) == ()
+        assert _model_ids(db, EmployeeProfile) == ()
+        assert _model_ids(db, WorkProject) == ()
+
+
+def test_quantxy_workbench_seed_accepts_only_the_canonical_fresh_demo() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        _add_pristine_demo_identities(db)
+
+        seed_quantxy_workbench(db)
+        db.commit()
+
         assert _model_ids(db, Department) == tuple(sorted(EXPECTED_DEPARTMENTS))
         assert _model_ids(db, EmployeeProfile) == tuple(sorted(EXPECTED_EMPLOYEES))
         assert _model_ids(db, WorkProject) == ("project_quantxy_delivery_example",)
+
+
+def test_demo_seed_does_not_add_workbench_examples_over_a_user_model_config() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        _add_pristine_demo_identities(db)
+        db.add(
+            ModelConfig(
+                id="model_user_owned",
+                tenant_id="tenant_demo",
+                name="用户默认模型",
+                api_key_encrypted="encrypted",
+                model="user-model",
+                is_default=True,
+            )
+        )
+        db.commit()
+
+        seed_demo_data(db)
+
+        assert db.get(ModelConfig, "model_user_owned") is not None
+        assert _model_ids(db, Department) == ()
+        assert _model_ids(db, EmployeeProfile) == ()
+        assert _model_ids(db, WorkProject) == ()
 
 
 def test_quantxy_workbench_seed_fails_closed_for_legacy_demo_business_activity() -> None:

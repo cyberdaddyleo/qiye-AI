@@ -18,6 +18,7 @@ from sqlmodel import Session, SQLModel, select
 from app.db.models import (
     Department,
     EmployeeProfile,
+    PersonaConfig,
     Tenant,
     User,
     WorkPlan,
@@ -29,6 +30,11 @@ from app.db.models import (
 
 TENANT_ID = "tenant_demo"
 PROJECT_ID = "project_quantxy_delivery_example"
+DEFAULT_PERSONA_PROMPT = (
+    "你是面壁智能的智能客服，语气专业、清晰、友好。"
+    "你需要先理解用户诉求，再基于已配置的技能和工具帮助用户完成业务办理。"
+    "不要暴露内部路由、技能 ID、步骤 ID 或工具实现细节。"
+)
 _SEED_LOCK = Lock()
 _SESSION_LOCK_KEY = "quantxy_workbench_seed_lock"
 _PREEXISTING_TRANSACTION_ERROR = (
@@ -51,30 +57,7 @@ _WORKBENCH_BUSINESS_MODELS = (
     WorkTaskDependency,
     WorkTaskEvent,
 )
-_BUILTIN_DEMO_BASELINE_TABLES = {
-    "agent_knowledge_branches",
-    "agent_profiles",
-    "agent_resource_bindings",
-    "agent_skill_branch_versions",
-    "agent_skill_branches",
-    "general_skills",
-    "knowledge_base_versions",
-    "knowledge_bases",
-    "knowledge_buckets",
-    "knowledge_chunks",
-    "knowledge_concepts",
-    "knowledge_discovery_suggestions",
-    "knowledge_documents",
-    "knowledge_ingest_jobs",
-    "mcp_servers",
-    "model_configs",
-    "persona_configs",
-    "skill_versions",
-    "skills",
-    "tenants",
-    "tools",
-    "users",
-}
+_PRISTINE_IDENTITY_TABLES = {"tenants", "users", "persona_configs"}
 
 
 @dataclass(frozen=True)
@@ -269,6 +252,13 @@ def _is_pristine_demo_database(session: Session, tenant_id: str) -> bool:
         ):
             return False
 
+    personas = session.exec(select(PersonaConfig)).all()
+    if len(personas) != 1:
+        return False
+    persona = personas[0]
+    if persona.tenant_id != tenant_id or persona.system_prompt != DEFAULT_PERSONA_PROMPT:
+        return False
+
     has_workbench_data = any(
         session.exec(select(model.id).limit(1)).first() is not None
         for model in _WORKBENCH_BUSINESS_MODELS
@@ -276,7 +266,7 @@ def _is_pristine_demo_database(session: Session, tenant_id: str) -> bool:
     if has_workbench_data:
         return False
 
-    allowed_tables = _BUILTIN_DEMO_BASELINE_TABLES | {
+    allowed_tables = _PRISTINE_IDENTITY_TABLES | {
         model.__tablename__ for model in _WORKBENCH_BUSINESS_MODELS
     }
     for table_name, table in SQLModel.metadata.tables.items():
