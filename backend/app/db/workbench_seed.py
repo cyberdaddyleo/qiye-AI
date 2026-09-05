@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from threading import Lock
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from sqlalchemy import event
 from sqlalchemy.engine import Connection
@@ -15,7 +15,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import SessionTransaction
 from sqlmodel import Session, select
 
-from app.db.database_path import sqlite_database_path_from_url
 from app.db.models import (
     Department,
     EmployeeProfile,
@@ -43,12 +42,41 @@ class _SeedLockState:
     file_handle: BinaryIO | None
 
 
+def _sqlite_main_database_path(dbapi_connection: Any) -> Path | None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA database_list")
+        filename = next(
+            (row[2] for row in cursor.fetchall() if row[1] == "main"),
+            "",
+        )
+    finally:
+        cursor.close()
+    if not filename:
+        return None
+    return Path(filename).resolve()
+
+
 def _sqlite_seed_lock_path(session: Session) -> Path | None:
     bind = session.get_bind()
     if bind.dialect.name != "sqlite":
         return None
-    engine = getattr(bind, "engine", bind)
-    database_path = sqlite_database_path_from_url(engine.url)
+
+    if isinstance(bind, Connection):
+        pool_connection = bind.connection
+        dbapi_connection = getattr(
+            pool_connection,
+            "driver_connection",
+            pool_connection,
+        )
+        database_path = _sqlite_main_database_path(dbapi_connection)
+    else:
+        raw_connection = bind.raw_connection()
+        try:
+            database_path = _sqlite_main_database_path(raw_connection)
+        finally:
+            raw_connection.close()
+
     if database_path is None:
         return None
     return database_path.with_name(f"{database_path.name}.quantxy-seed.lock")

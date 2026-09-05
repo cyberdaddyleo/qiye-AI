@@ -469,6 +469,157 @@ def test_sqlite_file_uri_uses_its_real_file_for_lock_identity(tmp_path: Path) ->
     engine.dispose()
 
 
+def test_sqlite_seed_lock_uses_sqlites_identity_for_literal_percent_paths(
+    tmp_path: Path,
+) -> None:
+    from app.db import workbench_seed
+
+    database_path = tmp_path / "literal%20identity.db"
+    ordinary_url = f"sqlite:///{database_path}"
+    sqlite_uri_url = (
+        f"sqlite:///file:{str(database_path).replace('%', '%25')}?uri=true"
+    )
+    expected_lock_path = database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    )
+    engines = [create_engine(ordinary_url), create_engine(sqlite_uri_url)]
+    try:
+        lock_paths = []
+        for engine in engines:
+            with Session(engine) as db:
+                lock_paths.append(workbench_seed._sqlite_seed_lock_path(db))
+        assert lock_paths == [expected_lock_path, expected_lock_path]
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+
+def test_sqlite_seed_lock_treats_memory_syntax_according_to_sqlite_uri_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db import workbench_seed
+
+    monkeypatch.chdir(tmp_path)
+    disk_cases = {
+        "sqlite:///file::memory:": tmp_path / "file::memory:",
+        "sqlite:///mode-false.db?mode=memory": tmp_path / "mode-false.db",
+    }
+    for database_url, database_path in disk_cases.items():
+        engine = create_engine(database_url)
+        try:
+            with Session(engine) as db:
+                assert workbench_seed._sqlite_seed_lock_path(
+                    db
+                ) == database_path.resolve().with_name(
+                    f"{database_path.name}.quantxy-seed.lock"
+                )
+        finally:
+            engine.dispose()
+
+    memory_urls = (
+        "sqlite:///file::memory:?cache=shared&uri=true",
+        "sqlite:///file:quantxy-named?mode=memory&cache=shared&uri=true",
+    )
+    for database_url in memory_urls:
+        engine = create_engine(database_url)
+        try:
+            with Session(engine) as db:
+                assert workbench_seed._sqlite_seed_lock_path(db) is None
+        finally:
+            engine.dispose()
+
+
+def test_sqlite_seed_lock_ignores_uri_fragments_in_physical_identity(
+    tmp_path: Path,
+) -> None:
+    from app.db import workbench_seed
+
+    database_path = tmp_path / "fragment-identity.db"
+    expected_lock_path = database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    )
+    engines = [
+        create_engine(f"sqlite:///file:{database_path}#{fragment}?uri=true")
+        for fragment in ("first", "second")
+    ]
+    try:
+        lock_paths = []
+        for engine in engines:
+            with Session(engine) as db:
+                lock_paths.append(workbench_seed._sqlite_seed_lock_path(db))
+        assert lock_paths == [expected_lock_path, expected_lock_path]
+    finally:
+        for engine in engines:
+            engine.dispose()
+
+
+def test_sqlite_seed_lock_follows_an_existing_relative_engine_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db import workbench_seed
+
+    original_directory = tmp_path / "original"
+    later_directory = tmp_path / "later"
+    original_directory.mkdir()
+    later_directory.mkdir()
+    monkeypatch.chdir(original_directory)
+    engine = create_engine("sqlite:///relative-identity.db")
+    raw_connection = engine.raw_connection()
+    try:
+        cursor = raw_connection.cursor()
+        cursor.execute("PRAGMA database_list")
+        sqlite_filename = next(
+            row[2] for row in cursor.fetchall() if row[1] == "main"
+        )
+        cursor.close()
+    finally:
+        raw_connection.close()
+
+    monkeypatch.chdir(later_directory)
+    try:
+        with Session(engine) as db:
+            assert workbench_seed._sqlite_seed_lock_path(
+                db
+            ) == (original_directory / "relative-identity.db").resolve().with_name(
+                "relative-identity.db.quantxy-seed.lock"
+            )
+            assert not db.in_transaction()
+        assert Path(sqlite_filename).resolve() == (
+            original_directory / "relative-identity.db"
+        ).resolve()
+    finally:
+        engine.dispose()
+
+
+def test_sqlite_lock_identity_probe_does_not_start_sqlalchemy_transactions(
+    tmp_path: Path,
+) -> None:
+    from app.db import workbench_seed
+
+    database_path = tmp_path / "transaction-free-probe.db"
+    expected_lock_path = database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    )
+    engine = create_engine(f"sqlite:///{database_path}")
+    try:
+        with Session(engine) as db:
+            assert not db.in_transaction()
+            assert workbench_seed._sqlite_seed_lock_path(db) == expected_lock_path
+            assert not db.in_transaction()
+
+        with engine.connect() as connection:
+            assert not connection.in_transaction()
+            with Session(bind=connection) as db:
+                assert not db.in_transaction()
+                assert workbench_seed._sqlite_seed_lock_path(db) == expected_lock_path
+                assert not db.in_transaction()
+                assert not connection.in_transaction()
+    finally:
+        engine.dispose()
+
+
 @pytest.mark.parametrize(
     "database_url",
     [
@@ -533,6 +684,75 @@ def test_demo_seed_serializes_plain_and_driver_urls_with_queries(
         results.join_thread()
 
     verification_engine = create_engine(plain_url)
+    with Session(verification_engine) as db:
+        assert _model_ids(db, Department) == tuple(sorted(EXPECTED_DEPARTMENTS))
+        assert _model_ids(db, EmployeeProfile) == tuple(sorted(EXPECTED_EMPLOYEES))
+        assert _model_ids(db, WorkProject) == ("project_quantxy_delivery_example",)
+        assert set(_model_ids(db, WorkTask)) == EXPECTED_TASK_IDS
+        assert len(_model_ids(db, WorkTaskDependency)) == len(EXPECTED_DEPENDENCIES)
+        assert set(_model_ids(db, WorkTaskEvent)) == {
+            event_id
+            for event_ids in EXPECTED_TASK_EVENT_IDS.values()
+            for event_id in event_ids
+        }
+    verification_engine.dispose()
+
+    canonical_lock_path = database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    )
+    assert canonical_lock_path.is_file()
+    assert list(tmp_path.glob("*.quantxy-seed.lock")) == [canonical_lock_path]
+
+
+def test_demo_seed_serializes_literal_percent_and_equivalent_uri_urls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "weird%20multiprocess.db"
+    ordinary_url = f"sqlite:///{database_path}?timeout=0.001"
+    sqlite_uri_url = (
+        f"sqlite:///file:{str(database_path).replace('%', '%25')}"
+        "?timeout=0.001&uri=true"
+    )
+    data_dir = tmp_path / "weird-url-data"
+    monkeypatch.setenv("DATABASE_URL", ordinary_url)
+    monkeypatch.setenv("ULTRARAG_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ULTRARAG_DOTENV", "/dev/null")
+
+    engine = create_engine(ordinary_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with engine.connect() as connection:
+        assert connection.execute(text("PRAGMA journal_mode=WAL")).scalar_one() == "wal"
+    engine.dispose()
+
+    context = multiprocessing.get_context("spawn")
+    start = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_seed_demo_data_in_process,
+            args=(url, str(data_dir), start, results),
+        )
+        for url in (ordinary_url, sqlite_uri_url)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=30)
+        outcomes = [results.get(timeout=5) for _ in processes]
+
+        assert [process.exitcode for process in processes] == [0, 0]
+        assert outcomes == [("ok", None), ("ok", None)]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        results.close()
+        results.join_thread()
+
+    verification_engine = create_engine(ordinary_url)
     with Session(verification_engine) as db:
         assert _model_ids(db, Department) == tuple(sorted(EXPECTED_DEPARTMENTS))
         assert _model_ids(db, EmployeeProfile) == tuple(sorted(EXPECTED_EMPLOYEES))
