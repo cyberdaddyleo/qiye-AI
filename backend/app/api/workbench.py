@@ -64,6 +64,7 @@ from app.workbench.service import (
     ensure_task_visible,
     list_visible_projects,
     list_visible_tasks,
+    list_visible_tasks_page,
     plan_for_tenant,
     plan_values_for_user,
     project_for_tenant,
@@ -81,6 +82,7 @@ from app.workbench.service import (
     update_project,
     update_task,
     user_for_tenant,
+    validate_employee_manager_assignment,
 )
 
 router = APIRouter(prefix="/api/enterprise/workbench", tags=["enterprise:workbench"])
@@ -103,6 +105,13 @@ class DepartmentUpdate(BaseModel):
     parent_id: str | None = None
     manager_user_id: str | None = None
     status: Literal["active", "archived"] | None = None
+
+    @field_validator("name", "code", "status", mode="before")
+    @classmethod
+    def reject_null_required_fields(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("field cannot be null")
+        return value
 
 
 class EmployeeCreate(BaseModel):
@@ -133,6 +142,13 @@ class EmployeeUpdate(BaseModel):
     manager_user_id: str | None = None
     assistant_agent_id: str | None = None
     status: Literal["active", "inactive"] | None = None
+
+    @field_validator("business_role", "skills", "capacity_percent", "status", mode="before")
+    @classmethod
+    def reject_null_required_fields(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("field cannot be null")
+        return value
 
 
 class ProjectCreate(BaseModel):
@@ -238,6 +254,22 @@ class TaskSubmit(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    @field_validator("artifact_refs")
+    @classmethod
+    def normalize_artifact_refs(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            item = value.strip()
+            if not item:
+                raise ValueError("artifact reference cannot be blank")
+            if len(item) > 2_048:
+                raise ValueError("artifact reference exceeds 2,048 characters")
+            if item not in seen:
+                seen.add(item)
+                normalized.append(item)
+        return normalized
+
 
 class PlanDispatchRequest(BaseModel):
     tenant_id: str
@@ -258,6 +290,13 @@ class DepartmentResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+
+
+class TaskPageResponse(BaseModel):
+    items: list[TaskRead]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
 
 
 class EmployeeResponse(BaseModel):
@@ -342,12 +381,9 @@ def _task_response(
     events: list[WorkTaskEvent] | None = None,
 ) -> TaskRead:
     values = row.model_dump()
-    values["dependencies"] = (
-        task_dependencies(db, row) if dependencies is None else dependencies
-    )
+    values["dependencies"] = task_dependencies(db, row) if dependencies is None else dependencies
     values["events"] = [
-        _event_response(event)
-        for event in (task_events(db, row) if events is None else events)
+        _event_response(event) for event in (task_events(db, row) if events is None else events)
     ]
     return TaskRead.model_validate(values)
 
@@ -560,6 +596,37 @@ def list_tasks_endpoint(
     return _task_responses(db, rows)
 
 
+@router.get("/tasks/page", response_model=TaskPageResponse)
+def list_tasks_page_endpoint(
+    tenant_id: str = Query(...),
+    scope: Literal["mine", "department", "all"] = Query("mine"),
+    status: Literal["backlog", "blocked", "in_progress", "review", "done", "canceled"]
+    | None = Query(None),
+    project_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> TaskPageResponse:
+    _access(db, tenant_id, current_user)
+    rows, total = list_visible_tasks_page(
+        db,
+        tenant_id,
+        current_user.id,
+        scope,
+        status=status,
+        project_id=project_id,
+        limit=limit,
+        offset=offset,
+    )
+    return TaskPageResponse(
+        items=_task_responses(db, rows),
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/tasks/{task_id}", response_model=TaskRead)
 def get_task_endpoint(
     task_id: str,
@@ -650,12 +717,14 @@ def dashboard_endpoint(
     db: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, object]:
-    _access(db, tenant_id, current_user)
-    data = dashboard_for_user(db, tenant_id, current_user.id)
+    access = _access(db, tenant_id, current_user)
+    data = dashboard_for_user(db, tenant_id, current_user.id, access=access)
     pending_reviews = list(data["pending_reviews"])
     at_risk_tasks = list(data["at_risk_tasks"])
     detail_rows = list({row.id: row for row in [*pending_reviews, *at_risk_tasks]}.values())
-    detail_by_id = {row.id: detail for row, detail in zip(detail_rows, _task_responses(db, detail_rows))}
+    detail_by_id = {
+        row.id: detail for row, detail in zip(detail_rows, _task_responses(db, detail_rows))
+    }
     data["pending_reviews"] = [detail_by_id[row.id].model_dump() for row in pending_reviews]
     data["at_risk_tasks"] = [detail_by_id[row.id].model_dump() for row in at_risk_tasks]
     data["recent_events"] = [_event_response(row).model_dump() for row in data["recent_events"]]
@@ -763,7 +832,7 @@ def create_employee_endpoint(
     _ensure_global_role_assignment(access, request.business_role)
     values = request.model_dump(exclude={"tenant_id", "skills"})
     values["skills_json"] = request.skills
-    row = create_employee(db, request.tenant_id, values)
+    row = create_employee(db, request.tenant_id, values, access=access)
     return _employee_response(db, row)
 
 
@@ -866,20 +935,17 @@ def update_employee_endpoint(
     db: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> EmployeeResponse:
-    _access(db, request.tenant_id, current_user)
+    access = _access(db, request.tenant_id, current_user)
     row = employee_for_tenant(db, request.tenant_id, employee_id)
     if not can_manage_employee(db, request.tenant_id, current_user.id, row):
         raise HTTPException(status_code=403, detail="Cannot manage this employee")
-    _ensure_global_role_assignment(
-        WorkbenchAccess.for_user(db, request.tenant_id, current_user.id), request.business_role
-    )
+    _ensure_global_role_assignment(access, request.business_role)
     values = request.model_dump(exclude_unset=True, exclude={"tenant_id", "skills"})
     if request.skills is not None:
         values["skills_json"] = request.skills
     if "department_id" in values:
-        access = WorkbenchAccess.for_user(db, request.tenant_id, current_user.id)
         _ensure_department_manage(access, values["department_id"])
-    return _employee_response(db, update_employee(db, row, values))
+    return _employee_response(db, update_employee(db, row, values, access=access))
 
 
 @router.delete("/employees/{employee_id}", status_code=204)
@@ -904,7 +970,7 @@ async def import_employees(
     db: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, object]:
-    require_global_manager(db, tenant_id, current_user.id)
+    access = require_global_manager(db, tenant_id, current_user.id)
     content = await file.read(MAX_IMPORT_BYTES + 1)
     if len(content) > MAX_IMPORT_BYTES:
         raise HTTPException(status_code=413, detail="Import file exceeds 5 MiB")
@@ -928,7 +994,7 @@ async def import_employees(
     ]
     results: list[dict[str, object]] = []
     for row in rows:
-        error = _import_row_error(db, tenant_id, row)
+        error = _import_row_error(db, tenant_id, row, access)
         if error:
             errors.append({"row": row.row_number, **error})
             continue
@@ -999,7 +1065,12 @@ def _user_by_username(db: Session, tenant_id: str, username: str | None) -> User
     ).first()
 
 
-def _import_row_error(db: Session, tenant_id: str, row: EmployeeImportRow) -> dict[str, str] | None:
+def _import_row_error(
+    db: Session,
+    tenant_id: str,
+    row: EmployeeImportRow,
+    access: WorkbenchAccess,
+) -> dict[str, str] | None:
     department = db.exec(
         select(Department).where(
             Department.tenant_id == tenant_id,
@@ -1012,9 +1083,7 @@ def _import_row_error(db: Session, tenant_id: str, row: EmployeeImportRow) -> di
     if row.business_role == "admin":
         return {"code": "invalid_business_role", "message": "business_role is invalid"}
     user = _user_by_username(db, tenant_id, row.username)
-    if row.business_role == "manager" and (
-        user is None or department.manager_user_id != user.id
-    ):
+    if row.business_role == "manager" and (user is None or department.manager_user_id != user.id):
         return {
             "code": "manager_scope_required",
             "message": "manager role requires department management",
@@ -1030,8 +1099,7 @@ def _import_row_error(db: Session, tenant_id: str, row: EmployeeImportRow) -> di
             ).all()
         )
         if managed_department_ids and (
-            "business_role" in row.provided_fields
-            and row.business_role != "manager"
+            "business_role" in row.provided_fields and row.business_role != "manager"
         ):
             return {
                 "code": "manager_role_required",
@@ -1042,8 +1110,24 @@ def _import_row_error(db: Session, tenant_id: str, row: EmployeeImportRow) -> di
                 "code": "manager_department_required",
                 "message": "department manager must remain in a managed department",
             }
-    if row.manager_username and _user_by_username(db, tenant_id, row.manager_username) is None:
-        return {"code": "unknown_manager", "message": "负责人账号不存在"}
+    if row.manager_username:
+        manager = _user_by_username(db, tenant_id, row.manager_username)
+        if manager is None:
+            return {"code": "unknown_manager", "message": "负责人账号不存在"}
+        try:
+            validate_employee_manager_assignment(
+                db,
+                tenant_id,
+                manager.id,
+                access,
+            )
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                return {
+                    "code": "manager_outside_scope",
+                    "message": "负责人超出可管理范围",
+                }
+            return {"code": "inactive_manager", "message": "负责人必须是在职员工"}
     if row.assistant_agent_id:
         assistant = db.get(AgentProfile, row.assistant_agent_id)
         if assistant is None or assistant.tenant_id != tenant_id:
@@ -1067,7 +1151,10 @@ def _import_profile_values(
         "assistant_agent_id": row.assistant_agent_id,
     }
     for field, value in optional_values.items():
-        input_field = "skills" if field == "skills_json" else field
+        input_field = {
+            "skills_json": "skills",
+            "manager_user_id": "manager_username",
+        }.get(field, field)
         if input_field in row.provided_fields and value is not None:
             values[field] = value
     return values

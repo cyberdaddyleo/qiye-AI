@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
@@ -26,6 +28,7 @@ from app.db.models import (
 )
 from app.main import app
 from app.security.auth import create_access_token
+from app.workbench.service import update_department
 
 
 def _headers(user: dict[str, str]) -> dict[str, str]:
@@ -1560,3 +1563,448 @@ def test_dashboard_visibility_and_project_aggregates_have_constant_query_budget(
     assert response.json()["project_count"] >= 11
     assert response.json()["task_counts"]["backlog"] >= 10
     assert len(queries) <= 14
+
+
+def test_employee_create_rejects_direct_manager_outside_staffing_scope(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    client, engine, rows = workbench_boundary
+    with Session(engine) as db:
+        target = User(
+            tenant_id="tenant_a",
+            username="new-report-final",
+            password_hash="hash",
+        )
+        db.add(target)
+        db.commit()
+        target_id = target.id
+
+    rejected = client.post(
+        "/api/enterprise/workbench/employees",
+        headers=_headers(rows["manager"]),
+        json={
+            "tenant_id": "tenant_a",
+            "user_id": target_id,
+            "department_id": rows["engineering"]["id"],
+            "manager_user_id": rows["design"]["id"],
+        },
+    )
+    assert rejected.status_code == 403, rejected.text
+    with Session(engine) as db:
+        assert (
+            db.exec(select(EmployeeProfile).where(EmployeeProfile.user_id == target_id)).first()
+            is None
+        )
+
+    accepted = client.post(
+        "/api/enterprise/workbench/employees",
+        headers=_headers(rows["admin"]),
+        json={
+            "tenant_id": "tenant_a",
+            "user_id": target_id,
+            "department_id": rows["engineering"]["id"],
+            "manager_user_id": rows["design"]["id"],
+        },
+    )
+    assert accepted.status_code == 201, accepted.text
+    assert accepted.json()["manager_user_id"] == rows["design"]["id"]
+
+
+@pytest.mark.parametrize(
+    ("actor", "candidate", "expected_status"),
+    [
+        ("manager", "design", 403),
+        ("manager", "inactive", 422),
+        ("manager", "unprofiled", 422),
+        ("ceo", "design", 200),
+        ("admin", "design", 200),
+    ],
+)
+def test_employee_update_direct_manager_requires_active_profile_in_actor_scope(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+    actor: str,
+    candidate: str,
+    expected_status: int,
+) -> None:
+    client, engine, rows = workbench_boundary
+    response = client.patch(
+        f"/api/enterprise/workbench/employees/{rows['profile_member']['id']}",
+        headers=_headers(rows[actor]),
+        json={
+            "tenant_id": "tenant_a",
+            "manager_user_id": rows[candidate]["id"],
+        },
+    )
+    assert response.status_code == expected_status, response.text
+    with Session(engine) as db:
+        profile = db.get(EmployeeProfile, rows["profile_member"]["id"])
+        assert profile is not None
+        assert profile.manager_user_id == (
+            rows[candidate]["id"] if expected_status == 200 else None
+        )
+
+
+def test_employee_import_rejects_inactive_or_unprofiled_direct_managers_per_row(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    client, engine, rows = workbench_boundary
+    content = (
+        b"username,display_name,department,manager_username\n"
+        b"member-final,Member Changed,Engineering,inactive-final\n"
+        b"colleague-final,Colleague Changed,Engineering,unprofiled-final\n"
+        b"owner-final,Owner Changed,Engineering,design-final\n"
+    )
+    response = client.post(
+        "/api/enterprise/workbench/employees/import",
+        params={"tenant_id": "tenant_a"},
+        headers=_headers(rows["admin"]),
+        files={"file": ("employees.csv", content, "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["created"] == 0
+    assert response.json()["updated"] == 1
+    assert response.json()["errors"] == [
+        {
+            "row": 2,
+            "code": "inactive_manager",
+            "message": "负责人必须是在职员工",
+        },
+        {
+            "row": 3,
+            "code": "inactive_manager",
+            "message": "负责人必须是在职员工",
+        },
+    ]
+    with Session(engine) as db:
+        member = db.get(EmployeeProfile, rows["profile_member"]["id"])
+        colleague = db.get(EmployeeProfile, rows["profile_colleague"]["id"])
+        owner = db.get(EmployeeProfile, rows["profile_owner"]["id"])
+        member_user = db.get(User, rows["member"]["id"])
+        colleague_user = db.get(User, rows["colleague"]["id"])
+        owner_user = db.get(User, rows["owner"]["id"])
+        assert member is not None and member.manager_user_id is None
+        assert colleague is not None and colleague.manager_user_id is None
+        assert owner is not None and owner.manager_user_id == rows["design"]["id"]
+        assert member_user is not None and member_user.display_name is None
+        assert colleague_user is not None and colleague_user.display_name is None
+        assert owner_user is not None and owner_user.display_name == "Owner Changed"
+
+
+@pytest.mark.parametrize("field", ["name", "code", "status"])
+def test_department_update_explicit_null_for_non_nullable_fields_returns_422(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+    field: str,
+) -> None:
+    _, _, rows = workbench_boundary
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.patch(
+            f"/api/enterprise/workbench/departments/{rows['engineering']['id']}",
+            headers=_headers(rows["admin"]),
+            json={"tenant_id": "tenant_a", field: None},
+        )
+    assert response.status_code == 422, response.text
+    assert any(item["loc"][-1] == field for item in response.json()["detail"])
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["business_role", "skills", "capacity_percent", "status"],
+)
+def test_employee_update_explicit_null_for_non_nullable_fields_returns_422(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+    field: str,
+) -> None:
+    _, _, rows = workbench_boundary
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.patch(
+            f"/api/enterprise/workbench/employees/{rows['profile_member']['id']}",
+            headers=_headers(rows["admin"]),
+            json={"tenant_id": "tenant_a", field: None},
+        )
+    assert response.status_code == 422, response.text
+    assert any(item["loc"][-1] == field for item in response.json()["detail"])
+
+
+def test_update_dtos_still_allow_clearing_nullable_fields(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    client, engine, rows = workbench_boundary
+    with Session(engine) as db:
+        profile = db.get(EmployeeProfile, rows["profile_member"]["id"])
+        department = db.get(Department, rows["design_department"]["id"])
+        assert profile is not None and department is not None
+        profile.job_title = "Engineer"
+        profile.manager_user_id = rows["design"]["id"]
+        department.parent_id = rows["engineering"]["id"]
+        db.add_all([profile, department])
+        db.commit()
+
+    employee_response = client.patch(
+        f"/api/enterprise/workbench/employees/{rows['profile_member']['id']}",
+        headers=_headers(rows["admin"]),
+        json={
+            "tenant_id": "tenant_a",
+            "job_title": None,
+            "daily_cost": None,
+            "manager_user_id": None,
+        },
+    )
+    department_response = client.patch(
+        f"/api/enterprise/workbench/departments/{rows['design_department']['id']}",
+        headers=_headers(rows["admin"]),
+        json={"tenant_id": "tenant_a", "parent_id": None},
+    )
+    assert employee_response.status_code == 200, employee_response.text
+    assert employee_response.json()["job_title"] is None
+    assert employee_response.json()["daily_cost"] is None
+    assert employee_response.json()["manager_user_id"] is None
+    assert department_response.status_code == 200, department_response.text
+    assert department_response.json()["parent_id"] is None
+
+
+@pytest.mark.parametrize(
+    "artifact_refs",
+    [[""], ["resource:a", "   "], ["x" * 2_049]],
+)
+def test_task_submit_rejects_blank_or_oversized_artifact_references(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+    artifact_refs: list[str],
+) -> None:
+    client, _, rows = workbench_boundary
+    response = client.post(
+        f"/api/enterprise/workbench/tasks/{rows['task_own']['id']}/submit",
+        headers=_headers(rows["member"]),
+        json={
+            "tenant_id": "tenant_a",
+            "version": 0,
+            "result_summary": "completed",
+            "artifact_refs": artifact_refs,
+        },
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_task_submit_strips_and_stably_deduplicates_artifact_references(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    client, _, rows = workbench_boundary
+    response = client.post(
+        f"/api/enterprise/workbench/tasks/{rows['task_own']['id']}/submit",
+        headers=_headers(rows["member"]),
+        json={
+            "tenant_id": "tenant_a",
+            "version": 0,
+            "result_summary": "completed",
+            "artifact_refs": [
+                "  resource:report  ",
+                "resource:report",
+                " upload:screenshot ",
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    submitted = next(
+        event for event in response.json()["events"] if event["event_type"] == "result_submitted"
+    )
+    assert submitted["payload"]["artifact_refs"] == [
+        "resource:report",
+        "upload:screenshot",
+    ]
+
+
+def test_same_assignee_with_other_changes_does_not_emit_assignment_event(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    client, _, rows = workbench_boundary
+    response = client.put(
+        f"/api/enterprise/workbench/tasks/{rows['task_colleague']['id']}",
+        headers=_headers(rows["manager"]),
+        json={
+            "tenant_id": "tenant_a",
+            "version": 0,
+            "title": "Dependency renamed",
+            "assignee_user_id": rows["colleague"]["id"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert [event["event_type"] for event in response.json()["events"]] == [
+        "task_created",
+        "task_updated",
+    ]
+
+
+def test_clearing_assignee_emits_task_unassigned_with_previous_and_new_values(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    client, _, rows = workbench_boundary
+    response = client.put(
+        f"/api/enterprise/workbench/tasks/{rows['task_colleague']['id']}",
+        headers=_headers(rows["manager"]),
+        json={
+            "tenant_id": "tenant_a",
+            "version": 0,
+            "assignee_user_id": None,
+        },
+    )
+    assert response.status_code == 200, response.text
+    event = response.json()["events"][-1]
+    assert event["event_type"] == "task_unassigned"
+    assert event["payload"]["previous_assignee_user_id"] == rows["colleague"]["id"]
+    assert event["payload"]["new_assignee_user_id"] is None
+
+
+def test_real_reassignment_emits_task_assigned_with_previous_and_new_values(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    client, _, rows = workbench_boundary
+    response = client.put(
+        f"/api/enterprise/workbench/tasks/{rows['task_colleague']['id']}",
+        headers=_headers(rows["manager"]),
+        json={
+            "tenant_id": "tenant_a",
+            "version": 0,
+            "assignee_user_id": rows["member"]["id"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    event = response.json()["events"][-1]
+    assert event["event_type"] == "task_assigned"
+    assert event["payload"]["previous_assignee_user_id"] == rows["colleague"]["id"]
+    assert event["payload"]["new_assignee_user_id"] == rows["member"]["id"]
+
+
+def test_department_manager_update_uses_compare_and_swap_before_role_sync(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    _, engine, rows = workbench_boundary
+    first = Session(engine)
+    stale = Session(engine)
+    try:
+        first_department = first.get(Department, rows["engineering"]["id"])
+        stale_department = stale.get(Department, rows["engineering"]["id"])
+        assert first_department is not None and stale_department is not None
+        assert first_department.manager_user_id == rows["manager"]["id"]
+        assert stale_department.manager_user_id == rows["manager"]["id"]
+
+        update_department(
+            first,
+            first_department,
+            {"manager_user_id": rows["colleague"]["id"]},
+        )
+        with pytest.raises(HTTPException) as conflict:
+            update_department(
+                stale,
+                stale_department,
+                {"manager_user_id": rows["reviewer"]["id"]},
+            )
+        assert conflict.value.status_code == 409
+    finally:
+        first.close()
+        stale.close()
+
+    with Session(engine) as db:
+        department = db.get(Department, rows["engineering"]["id"])
+        old_manager = db.get(EmployeeProfile, rows["profile_manager"]["id"])
+        winning_manager = db.get(EmployeeProfile, rows["profile_colleague"]["id"])
+        losing_manager = db.get(EmployeeProfile, rows["profile_reviewer"]["id"])
+        assert department is not None
+        assert old_manager is not None
+        assert winning_manager is not None
+        assert losing_manager is not None
+        assert department.manager_user_id == rows["colleague"]["id"]
+        assert old_manager.business_role == "member"
+        assert winning_manager.business_role == "manager"
+        assert losing_manager.business_role == "member"
+
+
+def test_task_page_returns_exact_total_without_changing_legacy_list_contract(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    client, engine, rows = workbench_boundary
+    with Session(engine) as db:
+        for index in range(12):
+            db.add(
+                WorkTask(
+                    tenant_id="tenant_a",
+                    project_id=rows["project"]["id"],
+                    title=f"Envelope {index:02d}",
+                    assignee_user_id=rows["member"]["id"],
+                )
+            )
+        db.commit()
+
+    params = {
+        "tenant_id": "tenant_a",
+        "scope": "mine",
+        "status": "backlog",
+        "limit": 5,
+        "offset": 3,
+    }
+    legacy = client.get(
+        "/api/enterprise/workbench/tasks",
+        params=params,
+        headers=_headers(rows["member"]),
+    )
+    page = client.get(
+        "/api/enterprise/workbench/tasks/page",
+        params=params,
+        headers=_headers(rows["member"]),
+    )
+    assert legacy.status_code == 200, legacy.text
+    assert isinstance(legacy.json(), list)
+    assert len(legacy.json()) == 5
+    assert page.status_code == 200, page.text
+    assert page.json()["limit"] == 5
+    assert page.json()["offset"] == 3
+    assert page.json()["total"] == 13
+    assert page.json()["items"] == legacy.json()
+
+
+def test_dashboard_caps_details_but_keeps_full_query_side_aggregates(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    client, engine, rows = workbench_boundary
+    with Session(engine) as db:
+        for index in range(25):
+            project = WorkProject(
+                tenant_id="tenant_a",
+                name=f"Bounded dashboard {index:02d}",
+                objective="bounded details",
+                owner_user_id=rows["member"]["id"],
+                department_id=rows["engineering"]["id"],
+                health="at_risk",
+            )
+            db.add(project)
+            db.flush()
+            db.add(
+                WorkTask(
+                    tenant_id="tenant_a",
+                    project_id=project.id,
+                    title=f"Bounded review {index:02d}",
+                    status="review",
+                    assignee_user_id=rows["member"]["id"],
+                    reviewer_user_id=rows["member"]["id"],
+                    due_date=date(2026, 1, 1),
+                    result_summary="ready",
+                )
+            )
+        db.commit()
+
+    response = client.get(
+        "/api/enterprise/workbench/dashboard",
+        params={"tenant_id": "tenant_a"},
+        headers=_headers(rows["member"]),
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["project_count"] == 26
+    assert sum(data["task_counts"].values()) == 40
+    assert data["task_counts"]["review"] == 28
+    assert data["pending_review_count"] == 25
+    assert data["at_risk_project_count"] == 25
+    assert len(data["pending_reviews"]) == 20
+    assert len(data["at_risk_tasks"]) == 20
+    assert len(data["project_summaries"]) == 20
+    assert len(data["recent_events"]) <= 20
+    assert len(data["workload_rows"]) <= 20
+    assert len(data["department_loads"]) <= 20

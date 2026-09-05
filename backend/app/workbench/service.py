@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import case, func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -23,7 +23,7 @@ from app.db.models import (
     WorkTaskEvent,
     utc_now,
 )
-from app.workbench.permissions import WorkbenchAccess, employee_for_user
+from app.workbench.permissions import WorkbenchAccess
 from app.workbench.planner import (
     PlanVariant,
     build_variants,
@@ -89,19 +89,46 @@ def agent_for_tenant(db: Session, tenant_id: str, agent_id: str) -> AgentProfile
     return row
 
 
+def validate_employee_manager_assignment(
+    db: Session,
+    tenant_id: str,
+    manager_user_id: str | None,
+    access: WorkbenchAccess,
+) -> EmployeeProfile | None:
+    if manager_user_id is None:
+        return None
+    manager = active_employee_for_user(
+        db,
+        tenant_id,
+        manager_user_id,
+        label="Direct manager",
+    )
+    if not access.can_manage_department(manager.department_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Direct manager is outside the actor's staffing scope",
+        )
+    return manager
+
+
 def validate_employee_values(
     db: Session,
     tenant_id: str,
     values: dict[str, Any],
     *,
     employee_user_id: str | None = None,
+    access: WorkbenchAccess,
 ) -> None:
     department_id = values.get("department_id")
     if department_id:
         department_for_tenant(db, tenant_id, department_id)
-    for key in ("manager_user_id",):
-        if values.get(key):
-            user_for_tenant(db, tenant_id, values[key])
+    if values.get("manager_user_id"):
+        validate_employee_manager_assignment(
+            db,
+            tenant_id,
+            values["manager_user_id"],
+            access,
+        )
     if values.get("assistant_agent_id"):
         agent_for_tenant(db, tenant_id, values["assistant_agent_id"])
     if values.get("business_role") == "admin":
@@ -160,7 +187,13 @@ def validate_employee_values(
         )
 
 
-def create_employee(db: Session, tenant_id: str, values: dict[str, Any]) -> EmployeeProfile:
+def create_employee(
+    db: Session,
+    tenant_id: str,
+    values: dict[str, Any],
+    *,
+    access: WorkbenchAccess,
+) -> EmployeeProfile:
     user_id = values["user_id"]
     user_for_tenant(db, tenant_id, user_id)
     if db.exec(
@@ -169,7 +202,13 @@ def create_employee(db: Session, tenant_id: str, values: dict[str, Any]) -> Empl
         )
     ).first():
         raise HTTPException(status_code=409, detail="Employee already exists")
-    validate_employee_values(db, tenant_id, values, employee_user_id=user_id)
+    validate_employee_values(
+        db,
+        tenant_id,
+        values,
+        employee_user_id=user_id,
+        access=access,
+    )
     row = EmployeeProfile(tenant_id=tenant_id, **values)
     db.add(row)
     db.commit()
@@ -178,13 +217,18 @@ def create_employee(db: Session, tenant_id: str, values: dict[str, Any]) -> Empl
 
 
 def update_employee(
-    db: Session, employee: EmployeeProfile, values: dict[str, Any]
+    db: Session,
+    employee: EmployeeProfile,
+    values: dict[str, Any],
+    *,
+    access: WorkbenchAccess,
 ) -> EmployeeProfile:
     validate_employee_values(
         db,
         employee.tenant_id,
         values,
         employee_user_id=employee.user_id,
+        access=access,
     )
     for key, value in values.items():
         setattr(employee, key, value)
@@ -249,10 +293,27 @@ def update_department(
                 detail="A global employee role cannot be replaced by department manager",
             )
 
-    for key, value in values.items():
-        setattr(department, key, value)
-    department.updated_at = utc_now()
-    db.add(department)
+    now = utc_now()
+    if manager_changed:
+        result = db.exec(
+            sa_update(Department)
+            .where(
+                Department.id == department.id,
+                Department.tenant_id == department.tenant_id,
+                Department.manager_user_id == old_manager_user_id,
+            )
+            .values(**values, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Department manager conflict")
+        db.refresh(department)
+    else:
+        for key, value in values.items():
+            setattr(department, key, value)
+        department.updated_at = now
+        db.add(department)
 
     if new_manager is not None:
         new_manager.business_role = "manager"
@@ -316,10 +377,7 @@ def ensure_plan_visible(db: Session, plan: WorkPlan, actor_user_id: str) -> None
         access.can_view_all
         or project.owner_user_id == actor_user_id
         or _managed_project(access, project)
-        or (
-            plan.status != "dispatched"
-            and plan.created_by_user_id == actor_user_id
-        )
+        or (plan.status != "dispatched" and plan.created_by_user_id == actor_user_id)
     ):
         return
     assigned = db.exec(
@@ -343,10 +401,7 @@ def _full_plan_visibility(
         access.can_view_all
         or project.owner_user_id == access.user_id
         or _managed_project(access, project)
-        or (
-            plan.status != "dispatched"
-            and plan.created_by_user_id == access.user_id
-        )
+        or (plan.status != "dispatched" and plan.created_by_user_id == access.user_id)
     )
 
 
@@ -360,11 +415,7 @@ def _participant_plan_variant(
     selected = plan.selected_variant_json
     if selected is None:
         selected = next(
-            (
-                item
-                for item in plan.variants_json
-                if item.get("key") == plan.selected_variant
-            ),
+            (item for item in plan.variants_json if item.get("key") == plan.selected_variant),
             None,
         )
     if not isinstance(selected, dict):
@@ -380,9 +431,7 @@ def _participant_plan_variant(
         for task in raw_tasks
         if isinstance(task, dict) and isinstance(task.get("key"), str)
     }
-    included_keys = {
-        key for key in participant_task_keys if key in tasks_by_key
-    }
+    included_keys = {key for key in participant_task_keys if key in tasks_by_key}
     pending = list(included_keys)
     while pending:
         task = tasks_by_key[pending.pop()]
@@ -405,11 +454,15 @@ def _participant_plan_variant(
     safe["risks"] = []
     metrics = safe.get("metrics")
     critical_path = metrics.get("critical_path") if isinstance(metrics, dict) else None
-    safe["metrics"] = {
-        "critical_path": [
-            key for key in critical_path if isinstance(key, str) and key in included_keys
-        ]
-    } if isinstance(critical_path, list) else {}
+    safe["metrics"] = (
+        {
+            "critical_path": [
+                key for key in critical_path if isinstance(key, str) and key in included_keys
+            ]
+        }
+        if isinstance(critical_path, list)
+        else {}
+    )
     return safe
 
 
@@ -682,36 +735,38 @@ def update_project(
     return project
 
 
+def _visible_project_predicate(
+    access: WorkbenchAccess,
+    tenant_id: str,
+    user_id: str,
+) -> Any:
+    if access.can_view_all:
+        return WorkProject.tenant_id == tenant_id
+    participant_projects = (
+        select(WorkTask.project_id)
+        .where(
+            WorkTask.tenant_id == tenant_id,
+            (WorkTask.assignee_user_id == user_id) | (WorkTask.reviewer_user_id == user_id),
+        )
+        .distinct()
+    )
+    conditions = [
+        WorkProject.owner_user_id == user_id,
+        WorkProject.id.in_(participant_projects),
+    ]
+    if access.managed_department_ids:
+        conditions.append(WorkProject.department_id.in_(access.managed_department_ids))
+    return and_(
+        WorkProject.tenant_id == tenant_id,
+        or_(*conditions),
+    )
+
+
 def list_visible_projects(db: Session, tenant_id: str, user_id: str) -> list[WorkProject]:
     access = WorkbenchAccess.for_user(db, tenant_id, user_id)
     access.require_active_employee()
-    if access.can_view_all:
-        statement = select(WorkProject).where(WorkProject.tenant_id == tenant_id)
-    else:
-        participant_projects = (
-            select(WorkTask.project_id)
-            .where(
-                WorkTask.tenant_id == tenant_id,
-                (WorkTask.assignee_user_id == user_id)
-                | (WorkTask.reviewer_user_id == user_id),
-            )
-            .distinct()
-        )
-        conditions = [
-            WorkProject.owner_user_id == user_id,
-            WorkProject.id.in_(participant_projects),
-        ]
-        if access.managed_department_ids:
-            conditions.append(
-                WorkProject.department_id.in_(access.managed_department_ids)
-            )
-        statement = select(WorkProject).where(
-            WorkProject.tenant_id == tenant_id,
-            or_(*conditions),
-        )
-    return list(
-        db.exec(statement.order_by(WorkProject.created_at, WorkProject.id)).all()
-    )
+    statement = select(WorkProject).where(_visible_project_predicate(access, tenant_id, user_id))
+    return list(db.exec(statement.order_by(WorkProject.created_at, WorkProject.id)).all())
 
 
 def project_progress(db: Session, project: WorkProject) -> dict[str, int]:
@@ -1019,9 +1074,7 @@ def _dispatch_variant(
                     "previous_assignee_user_id": planned.assignee_user_id,
                 }
                 update["unassigned_reason"] = (
-                    None
-                    if update["assignee_user_id"]
-                    else "负责人已由管理者人工取消指派"
+                    None if update["assignee_user_id"] else "负责人已由管理者人工取消指派"
                 )
             effective = type(planned).model_validate(
                 {**planned.model_dump(mode="python"), **update}
@@ -1060,9 +1113,7 @@ def _validate_dispatch_variant(
             detail="Plan variant schedule or dependencies are invalid",
         ) from exc
 
-    assignee_ids = {
-        task.assignee_user_id for task in variant.tasks if task.assignee_user_id
-    }
+    assignee_ids = {task.assignee_user_id for task in variant.tasks if task.assignee_user_id}
     if not assignee_ids:
         return
     for assignee_id in sorted(assignee_ids):
@@ -1270,9 +1321,7 @@ def _ensure_executor(access: WorkbenchAccess, project: WorkProject, task: WorkTa
     del project
     access.require_active_employee()
     if task.assignee_user_id != access.user_id:
-        raise HTTPException(
-            status_code=403, detail="Only the assignee can execute this task"
-        )
+        raise HTTPException(status_code=403, detail="Only the assignee can execute this task")
 
 
 def _ensure_reviewer(access: WorkbenchAccess, project: WorkProject, task: WorkTask) -> None:
@@ -1299,6 +1348,7 @@ def update_task(
     ensure_task_visible(db, access, task, project)
     old_status = task.status
     old_progress = task.progress
+    old_assignee_user_id = task.assignee_user_id
     requested_status = values.get("status")
 
     if task.status in {"done", "canceled"}:
@@ -1319,16 +1369,14 @@ def update_task(
             detail="Execution fields are frozen while a task is in review",
         )
     if "progress" in values and (
-        task.status != "in_progress"
-        or requested_status not in {None, task.status}
+        task.status != "in_progress" or requested_status not in {None, task.status}
     ):
         raise HTTPException(
             status_code=422,
             detail="Progress can be changed only while a task remains in progress",
         )
     if dependency_ids is None and (
-        not values
-        or all(getattr(task, key) == value for key, value in values.items())
+        not values or all(getattr(task, key) == value for key, value in values.items())
     ):
         raise HTTPException(status_code=422, detail="Task update contains no changes")
 
@@ -1375,15 +1423,12 @@ def update_task(
             and requested_status == "backlog"
             and not _dependencies_are_ready(db, task)
         ):
-            raise HTTPException(
-                status_code=422, detail="Task dependencies are not complete"
-            )
+            raise HTTPException(status_code=422, detail="Task dependencies are not complete")
         dependencies = _validate_task_references(
             db, task.tenant_id, project, access, values, dependency_ids or []
         )
         if dependency_ids is not None and (
-            task.id in dependency_ids
-            or _would_cycle(db, task.tenant_id, task.id, dependency_ids)
+            task.id in dependency_ids or _would_cycle(db, task.tenant_id, task.id, dependency_ids)
         ):
             raise HTTPException(status_code=422, detail="Task dependency cycle detected")
     except HTTPException:
@@ -1427,15 +1472,20 @@ def update_task(
             {"old_progress": old_progress, "new_progress": task.progress},
         )
         event_written = True
-    if values.get("assignee_user_id") is not None:
+    if "assignee_user_id" in values and task.assignee_user_id != old_assignee_user_id:
+        event_type = "task_unassigned" if task.assignee_user_id is None else "task_assigned"
         _event(
             db,
             task,
-            "task_assigned",
+            event_type,
             actor_user_id,
             old_status,
             task.status,
-            {"assignee_user_id": task.assignee_user_id},
+            {
+                "assignee_user_id": task.assignee_user_id,
+                "previous_assignee_user_id": old_assignee_user_id,
+                "new_assignee_user_id": task.assignee_user_id,
+            },
         )
         event_written = True
     if dependency_ids is not None:
@@ -1692,16 +1742,14 @@ def task_events_bulk(
     return result
 
 
-def list_visible_tasks(
+def _visible_tasks_statement(
     db: Session,
     tenant_id: str,
     user_id: str,
     scope: str,
     status: str | None = None,
     project_id: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> list[WorkTask]:
+) -> Any:
     access = WorkbenchAccess.for_user(db, tenant_id, user_id)
     access.require_active_employee()
     statement = select(WorkTask).where(WorkTask.tenant_id == tenant_id)
@@ -1717,25 +1765,69 @@ def list_visible_tasks(
     elif scope == "department":
         if not access.managed_department_ids:
             raise HTTPException(status_code=403, detail="Cannot view department tasks")
-        project_ids = db.exec(
-            select(WorkProject.id).where(
-                WorkProject.tenant_id == tenant_id,
-                WorkProject.department_id.in_(access.managed_department_ids),
-            )
-        ).all()
+        project_ids = select(WorkProject.id).where(
+            WorkProject.tenant_id == tenant_id,
+            WorkProject.department_id.in_(access.managed_department_ids),
+        )
         statement = statement.where(WorkTask.project_id.in_(project_ids))
     elif scope == "all":
         if not access.can_view_all:
             raise HTTPException(status_code=403, detail="Cannot view all tasks")
     else:
         raise HTTPException(status_code=422, detail="Invalid task scope")
+    return statement
+
+
+def list_visible_tasks(
+    db: Session,
+    tenant_id: str,
+    user_id: str,
+    scope: str,
+    status: str | None = None,
+    project_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[WorkTask]:
+    statement = _visible_tasks_statement(
+        db,
+        tenant_id,
+        user_id,
+        scope,
+        status=status,
+        project_id=project_id,
+    )
     return list(
         db.exec(
-            statement.order_by(WorkTask.created_at, WorkTask.id)
-            .offset(offset)
-            .limit(limit)
+            statement.order_by(WorkTask.created_at, WorkTask.id).offset(offset).limit(limit)
         ).all()
     )
+
+
+def list_visible_tasks_page(
+    db: Session,
+    tenant_id: str,
+    user_id: str,
+    scope: str,
+    status: str | None = None,
+    project_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[WorkTask], int]:
+    statement = _visible_tasks_statement(
+        db,
+        tenant_id,
+        user_id,
+        scope,
+        status=status,
+        project_id=project_id,
+    )
+    total = int(db.exec(select(func.count()).select_from(statement.subquery())).one())
+    rows = list(
+        db.exec(
+            statement.order_by(WorkTask.created_at, WorkTask.id).offset(offset).limit(limit)
+        ).all()
+    )
+    return rows, total
 
 
 def project_progresses(
@@ -1743,10 +1835,7 @@ def project_progresses(
     projects: Iterable[WorkProject],
 ) -> dict[str, dict[str, int]]:
     rows = list(projects)
-    result = {
-        project.id: {"task_total": 0, "task_done": 0, "progress": 0}
-        for project in rows
-    }
+    result = {project.id: {"task_total": 0, "task_done": 0, "progress": 0} for project in rows}
     if not rows:
         return result
     aggregates = db.exec(
@@ -1755,11 +1844,13 @@ def project_progresses(
             func.count(WorkTask.id),
             func.sum(case((WorkTask.status == "done", 1), else_=0)),
             func.sum(WorkTask.progress),
-        ).where(
+        )
+        .where(
             WorkTask.tenant_id == rows[0].tenant_id,
             WorkTask.project_id.in_(list(result)),
             WorkTask.status != "canceled",
-        ).group_by(WorkTask.project_id)
+        )
+        .group_by(WorkTask.project_id)
     ).all()
     for project_id, total, done, progress_sum in aggregates:
         task_total = int(total or 0)
@@ -1771,118 +1862,185 @@ def project_progresses(
     return result
 
 
-def dashboard_for_user(db: Session, tenant_id: str, user_id: str) -> dict[str, Any]:
-    access = WorkbenchAccess.for_user(db, tenant_id, user_id)
-    access.require_active_employee()
-    projects = list_visible_projects(db, tenant_id, user_id)
-    project_ids = [project.id for project in projects]
-    tasks = (
-        list(
-            db.exec(
-                select(WorkTask).where(
-                    WorkTask.tenant_id == tenant_id,
-                    WorkTask.project_id.in_(project_ids),
-                )
-            ).all()
-        )
-        if project_ids
-        else []
-    )
-    if access.can_view_all:
-        employees = list(
-            db.exec(
-                select(EmployeeProfile).where(
-                    EmployeeProfile.tenant_id == tenant_id,
-                    EmployeeProfile.status == "active",
-                )
-            ).all()
-        )
-    elif access.managed_department_ids:
-        employees = list(
-            db.exec(
-                select(EmployeeProfile).where(
-                    EmployeeProfile.tenant_id == tenant_id,
-                    EmployeeProfile.status == "active",
-                    EmployeeProfile.department_id.in_(access.managed_department_ids),
-                )
-            ).all()
-        )
-    else:
-        profile = employee_for_user(db, tenant_id, user_id)
-        employees = [profile] if profile and profile.status == "active" else []
+DASHBOARD_DETAIL_LIMIT = 20
 
+
+def dashboard_for_user(
+    db: Session,
+    tenant_id: str,
+    user_id: str,
+    *,
+    access: WorkbenchAccess | None = None,
+) -> dict[str, Any]:
+    access = access or WorkbenchAccess.for_user(db, tenant_id, user_id)
+    access.require_active_employee()
+    project_predicate = _visible_project_predicate(access, tenant_id, user_id)
+    visible_project_ids = select(WorkProject.id).where(project_predicate)
+    project_rows = list(
+        db.exec(
+            select(
+                WorkProject,
+                func.count(WorkProject.id).over(),
+                func.sum(
+                    case((WorkProject.health.in_({"at_risk", "off_track"}), 1), else_=0)
+                ).over(),
+            )
+            .where(project_predicate)
+            .order_by(WorkProject.created_at, WorkProject.id)
+            .limit(DASHBOARD_DETAIL_LIMIT)
+        ).all()
+    )
+    projects = [row[0] for row in project_rows]
+    project_count = int(project_rows[0][1]) if project_rows else 0
+    at_risk_project_count = int(project_rows[0][2] or 0) if project_rows else 0
     progress_by_project = project_progresses(db, projects)
     project_summaries = [
-        {**_project_values(project), **progress_by_project[project.id]}
-        for project in projects
+        {**_project_values(project), **progress_by_project[project.id]} for project in projects
     ]
-    task_counts: dict[str, int] = {}
-    for task in tasks:
-        task_counts[task.status] = task_counts.get(task.status, 0) + 1
-    visible_task_ids = {task.id for task in tasks}
-    visible_event_ids = visible_task_ids | {project.id for project in projects}
-    recent_events = (
-        list(
-            db.exec(
-                select(WorkTaskEvent)
-                .where(
-                    WorkTaskEvent.tenant_id == tenant_id,
-                    WorkTaskEvent.task_id.in_(visible_event_ids),
-                )
-                .order_by(WorkTaskEvent.created_at.desc(), WorkTaskEvent.id.desc())
-                .limit(20)
-            ).all()
+
+    task_conditions = (
+        WorkTask.tenant_id == tenant_id,
+        WorkTask.project_id.in_(visible_project_ids),
+    )
+    if access.can_view_all:
+        review_condition = WorkTask.id.is_not(None)
+    else:
+        review_project_conditions = [WorkProject.owner_user_id == user_id]
+        if access.managed_department_ids:
+            review_project_conditions.append(
+                WorkProject.department_id.in_(access.managed_department_ids)
+            )
+        review_project_ids = select(WorkProject.id).where(
+            WorkProject.tenant_id == tenant_id,
+            or_(*review_project_conditions),
         )
-        if visible_event_ids
-        else []
+        review_condition = or_(
+            WorkTask.reviewer_user_id == user_id,
+            WorkTask.project_id.in_(review_project_ids),
+        )
+    task_count_rows = db.exec(
+        select(
+            WorkTask.status,
+            func.count(WorkTask.id),
+            func.sum(
+                case(
+                    (
+                        and_(WorkTask.status == "review", review_condition),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+        )
+        .where(*task_conditions)
+        .group_by(WorkTask.status)
+    ).all()
+    task_counts = {status: int(count) for status, count, _ in task_count_rows}
+    pending_review_count = sum(int(review_count or 0) for _, _, review_count in task_count_rows)
+
+    visible_task_ids = select(WorkTask.id).where(*task_conditions)
+    recent_events = list(
+        db.exec(
+            select(WorkTaskEvent)
+            .where(
+                WorkTaskEvent.tenant_id == tenant_id,
+                or_(
+                    WorkTaskEvent.task_id.in_(visible_task_ids),
+                    WorkTaskEvent.task_id.in_(visible_project_ids),
+                ),
+            )
+            .order_by(WorkTaskEvent.created_at.desc(), WorkTaskEvent.id.desc())
+            .limit(DASHBOARD_DETAIL_LIMIT)
+        ).all()
     )
     incomplete = {"blocked", "backlog", "in_progress", "review"}
     today = utc_now().date()
-    at_risk_tasks = [
-        task
-        for task in tasks
-        if task.status in incomplete and task.due_date and task.due_date < today
-    ]
-    projects_by_id = {project.id: project for project in projects}
-    pending_reviews = [
-        task
-        for task in tasks
-        if task.status == "review"
-        and (
-            access.can_view_all
-            or task.reviewer_user_id == user_id
-            or projects_by_id[task.project_id].owner_user_id == user_id
-            or (
-                projects_by_id[task.project_id].department_id
-                in access.managed_department_ids
+    at_risk_tasks = list(
+        db.exec(
+            select(WorkTask)
+            .where(
+                *task_conditions,
+                WorkTask.status.in_(incomplete),
+                WorkTask.due_date.is_not(None),
+                WorkTask.due_date < today,
             )
-        )
+            .order_by(WorkTask.due_date, WorkTask.created_at, WorkTask.id)
+            .limit(DASHBOARD_DETAIL_LIMIT)
+        ).all()
+    )
+    pending_reviews = list(
+        db.exec(
+            select(WorkTask)
+            .where(
+                *task_conditions,
+                WorkTask.status == "review",
+                review_condition,
+            )
+            .order_by(WorkTask.created_at, WorkTask.id)
+            .limit(DASHBOARD_DETAIL_LIMIT)
+        ).all()
+    )
+
+    employee_conditions = [
+        EmployeeProfile.tenant_id == tenant_id,
+        EmployeeProfile.status == "active",
     ]
+    if not access.can_view_all:
+        if access.managed_department_ids:
+            employee_conditions.append(
+                EmployeeProfile.department_id.in_(access.managed_department_ids)
+            )
+        else:
+            employee_conditions.append(EmployeeProfile.user_id == user_id)
+    employee_rows = list(
+        db.exec(
+            select(EmployeeProfile, func.count(EmployeeProfile.id).over())
+            .where(*employee_conditions)
+            .order_by(EmployeeProfile.created_at, EmployeeProfile.id)
+            .limit(DASHBOARD_DETAIL_LIMIT)
+        ).all()
+    )
+    employees = [row[0] for row in employee_rows]
+    employee_count = int(employee_rows[0][1]) if employee_rows else 0
+    workload_by_user: dict[str, tuple[int, float]] = {}
+    if employees:
+        workload_aggregates = db.exec(
+            select(
+                WorkTask.assignee_user_id,
+                func.count(WorkTask.id),
+                func.sum(WorkTask.estimate_days),
+            )
+            .where(
+                *task_conditions,
+                WorkTask.status.in_(incomplete),
+                WorkTask.assignee_user_id.in_([employee.user_id for employee in employees]),
+            )
+            .group_by(WorkTask.assignee_user_id)
+        ).all()
+        workload_by_user = {
+            assignee_user_id: (int(active_count), float(estimate_days or 0))
+            for assignee_user_id, active_count, estimate_days in workload_aggregates
+            if assignee_user_id is not None
+        }
     workload_rows: list[dict[str, Any]] = []
     for employee in employees:
-        active = [
-            task
-            for task in tasks
-            if task.assignee_user_id == employee.user_id and task.status in incomplete
-        ]
+        active_count, estimate_days = workload_by_user.get(employee.user_id, (0, 0.0))
         workload_rows.append(
             {
                 "user_id": employee.user_id,
                 "department_id": employee.department_id,
                 "capacity_percent": employee.capacity_percent,
-                "active_task_count": len(active),
-                "estimate_days": sum(task.estimate_days or 0 for task in active),
+                "active_task_count": active_count,
+                "estimate_days": estimate_days,
             }
         )
     return {
         "tenant_id": tenant_id,
-        "project_count": len(projects),
+        "project_count": project_count,
         "task_counts": task_counts,
-        "employee_count": len(employees),
-        "pending_review_count": len(pending_reviews),
-        "at_risk_project_count": sum(
-            project.health in {"at_risk", "off_track"} for project in projects
-        ),
+        "employee_count": employee_count,
+        "pending_review_count": pending_review_count,
+        "at_risk_project_count": at_risk_project_count,
         "department_loads": workload_rows,
         "workload_rows": workload_rows,
         "pending_reviews": pending_reviews,
