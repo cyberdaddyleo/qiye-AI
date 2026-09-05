@@ -78,10 +78,14 @@ function sanitizeEmployeeIdentifiers(
     return [userId, employee?.display_name || employee?.username || '真人员工'];
   }));
   const pattern = new RegExp(
-    ordered.map((userId) => userId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+    `(^|[^A-Za-z0-9_-])(${ordered
+      .map((userId) => userId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|')})(?=$|[^A-Za-z0-9_-])`,
     'g',
   );
-  return value.replace(pattern, (userId) => replacements.get(userId) || '真人员工');
+  return value.replace(pattern, (_match, prefix: string, userId: string) => (
+    `${prefix}${replacements.get(userId) || '真人员工'}`
+  ));
 }
 
 export default function PlanComparison({

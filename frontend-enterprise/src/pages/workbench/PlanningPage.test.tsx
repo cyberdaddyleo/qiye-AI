@@ -423,6 +423,73 @@ describe('PlanningPage', () => {
     expect(document.body.textContent).not.toContain(employee.user_id);
   });
 
+  it('replaces only complete employee identifiers in risks and rationales', async () => {
+    const prefixEmployee: EmployeeRead = {
+      ...employee,
+      id: 'employee-prefix',
+      user_id: 'user-a',
+      username: 'prefix',
+      display_name: '短前缀员工',
+      employee_no: 'E101',
+    };
+    const overlappingEmployee: EmployeeRead = {
+      ...employee,
+      id: 'employee-overlapping',
+      user_id: 'user-admin',
+      username: 'overlapping',
+      display_name: '长前缀员工',
+      employee_no: 'E102',
+    };
+    const shortIdEmployee: EmployeeRead = {
+      ...employee,
+      id: 'employee-short-id',
+      user_id: 'art',
+      username: 'short-id',
+      display_name: '短 ID 员工',
+      employee_no: 'E103',
+    };
+    const boundaryPlan: PlanRead = {
+      ...fallbackPlan,
+      variants: fallbackPlan.variants.map((candidate) => ({
+        ...candidate,
+        risks: [
+          '边界：(user-admin)、[user-a]、art；user-administrator、xuser-a、cartography 保持原样。',
+        ],
+        tasks: candidate.tasks.map((task) => task.key === 'research' ? {
+          ...task,
+          assignee_user_id: prefixEmployee.user_id,
+          assignment: {
+            ...task.assignment,
+            candidate_scores: {
+              'user-a': { total_score: 92 },
+              'user-admin': { total_score: 90 },
+              art: { total_score: 88 },
+            },
+            rationale: '推荐 user-admin 与 art 支援 user-a；user-administrator、smart、xuser-a 保持原样。',
+          },
+        } : task),
+      })),
+    };
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([
+      prefixEmployee,
+      overlappingEmployee,
+      shortIdEmployee,
+    ]);
+    vi.mocked(workbenchApi.previewPlan).mockResolvedValueOnce(boundaryPlan);
+    const user = userEvent.setup();
+    renderPlanning();
+
+    await generatePlan(user);
+    const balanced = await screen.findByRole('article', { name: 'A 方案' });
+    expect(balanced.textContent).toContain(
+      '边界：(长前缀员工)、[短前缀员工]、短 ID 员工；user-administrator、xuser-a、cartography 保持原样。',
+    );
+    const wbs = screen.getByRole('region', { name: '可编辑 WBS' });
+    expect(wbs.textContent).toContain(
+      '推荐 长前缀员工 与 短 ID 员工 支援 短前缀员工；user-administrator、smart、xuser-a 保持原样。',
+    );
+  });
+
   it('requires explicit confirmation, dispatches once with a stable key, and navigates to tasks', async () => {
     const dispatch = deferred<TaskRead[]>();
     vi.mocked(workbenchApi.dispatchPlan).mockReturnValueOnce(dispatch.promise);
