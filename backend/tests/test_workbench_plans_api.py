@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, timedelta
 
 import pytest
@@ -232,6 +233,10 @@ def test_dispatch_is_atomic_preserves_schedule_and_is_idempotent(
         stored_plan = db.get(WorkPlan, preview["id"])
         assert stored_plan.status == "dispatched"
         assert stored_plan.selected_variant == "A"
+        assert stored_plan.selected_variant_json["tasks"][0]["assignment"] == selected[
+            "tasks"
+        ][0]["assignment"]
+        assert stored_plan.dispatch_overrides_json == []
         assert stored_plan.dispatch_idempotency_key == "dispatch-launch-v1"
         dependencies = db.exec(select(WorkTaskDependency)).all()
         assert dependencies
@@ -245,7 +250,12 @@ def test_dispatch_uses_edited_variant_and_audits_overrides_with_payload_safe_rep
     preview = _preview(client, users["manager"], project)
     selected = next(variant for variant in preview["variants"] if variant["key"] == "A")
     edited = _dispatch_tasks(selected)
-    edited[0]["assignee_user_id"] = users["analyst"].id
+    replacement = (
+        users["engineer"]
+        if selected["tasks"][0]["assignee_user_id"] != users["engineer"].id
+        else users["analyst"]
+    )
+    edited[0]["assignee_user_id"] = replacement.id
     edited[0]["acceptance_criteria"] = "人工确认：访谈记录与范围清单均已签字"
     edited[-1]["depends_on"] = [edited[0]["key"]]
     edited[-1]["due_date"] = (
@@ -270,7 +280,7 @@ def test_dispatch_uses_edited_variant_and_audits_overrides_with_payload_safe_rep
     original_by_key = {task["key"]: task for task in selected["tasks"]}
     first_created = created_by_title[original_by_key[edited[0]["key"]]["title"]]
     last_created = created_by_title[original_by_key[edited[-1]["key"]]["title"]]
-    assert first_created["assignee_user_id"] == users["analyst"].id
+    assert first_created["assignee_user_id"] == replacement.id
     assert first_created["acceptance_criteria"] == edited[0]["acceptance_criteria"]
     assert last_created["due_date"] == edited[-1]["due_date"]
     assert last_created["dependencies"] == [first_created["id"]]
@@ -278,7 +288,12 @@ def test_dispatch_uses_edited_variant_and_audits_overrides_with_payload_safe_rep
     with Session(engine) as db:
         stored = db.get(WorkPlan, preview["id"])
         assert stored.selected_variant_json["key"] == "A"
-        assert stored.selected_variant_json["tasks"][0]["assignee_user_id"] == users["analyst"].id
+        assert stored.selected_variant_json["tasks"][0]["assignee_user_id"] == replacement.id
+        assert stored.selected_variant_json["tasks"][0]["assignment"] == {
+            "provenance": "manual",
+            "manual_assignment_kind": "reassigned",
+            "previous_assignee_user_id": selected["tasks"][0]["assignee_user_id"],
+        }
         assert {item["key"] for item in stored.dispatch_overrides_json} == {
             edited[0]["key"],
             edited[-1]["key"],
@@ -313,6 +328,51 @@ def test_dispatch_uses_edited_variant_and_audits_overrides_with_payload_safe_rep
         json=changed_payload,
     )
     assert conflict.status_code == 409
+
+
+def test_dispatch_marks_an_originally_unassigned_task_as_manually_assigned(
+    workbench: tuple[TestClient, object, dict[str, User], WorkProject]
+) -> None:
+    client, engine, users, project = workbench
+    preview = _preview(client, users["manager"], project)
+    with Session(engine) as db:
+        stored = db.get(WorkPlan, preview["id"])
+        variants = deepcopy(stored.variants_json)
+        selected = next(variant for variant in variants if variant["key"] == "A")
+        selected["tasks"][0]["assignee_user_id"] = None
+        selected["tasks"][0]["assignment"] = {"candidate_scores": {}}
+        selected["tasks"][0]["unassigned_reason"] = "AI 原方案未找到合适员工"
+        stored.variants_json = variants
+        db.add(stored)
+        db.commit()
+
+    edited = _dispatch_tasks(selected)
+    edited[0]["assignee_user_id"] = users["engineer"].id
+    response = client.post(
+        f"/api/enterprise/workbench/plans/{preview['id']}/dispatch",
+        headers=_headers(users["manager"]),
+        json={
+            "tenant_id": "tenant_a",
+            "variant_key": "A",
+            "idempotency_key": "originally-unassigned-owner",
+            "tasks": edited,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    with Session(engine) as db:
+        stored = db.get(WorkPlan, preview["id"])
+        effective_task = stored.selected_variant_json["tasks"][0]
+        assert effective_task["assignee_user_id"] == users["engineer"].id
+        assert effective_task["assignment"] == {
+            "provenance": "manual",
+            "manual_assignment_kind": "assigned",
+            "previous_assignee_user_id": None,
+        }
+        assignee_override = next(
+            item for item in stored.dispatch_overrides_json if item["key"] == effective_task["key"]
+        )["changes"]["assignee_user_id"]
+        assert assignee_override == {"from": None, "to": users["engineer"].id}
 
 
 def test_unauthorized_dispatch_is_forbidden_and_second_key_conflicts(

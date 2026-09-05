@@ -111,6 +111,7 @@ export default function PlanningPage({ currentUser, onLogout }: PlanningPageProp
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState('');
   const [plan, setPlan] = useState<PlanRead | null>(null);
+  const [originalVariants, setOriginalVariants] = useState<PlanVariant[]>([]);
   const [variants, setVariants] = useState<PlanVariant[]>([]);
   const [selectedVariantKey, setSelectedVariantKey] = useState<PlanVariantKey>('A');
   const [confirmed, setConfirmed] = useState(false);
@@ -174,15 +175,15 @@ export default function PlanningPage({ currentUser, onLogout }: PlanningPageProp
     [access, currentUser.id, projects],
   );
   const editedVariantKeys = useMemo(() => {
-    if (!plan) return [];
+    if (!plan || originalVariants.length === 0) return [];
     return variants
       .filter((variant) => {
-        const original = plan.variants.find((candidate) => candidate.key === variant.key);
+        const original = originalVariants.find((candidate) => candidate.key === variant.key);
         return !original
           || JSON.stringify(dispatchTasks(original)) !== JSON.stringify(dispatchTasks(variant));
       })
       .map((variant) => variant.key);
-  }, [plan, variants]);
+  }, [originalVariants, plan, variants]);
   const selectedVariantEdited = Boolean(
     selectedVariant && editedVariantKeys.includes(selectedVariant.key),
   );
@@ -211,6 +212,7 @@ export default function PlanningPage({ currentUser, onLogout }: PlanningPageProp
         return;
       }
       setPlan(result);
+      setOriginalVariants(cloneVariants(nextVariants));
       setVariants(nextVariants);
       setSelectedVariantKey(nextVariants[0].key);
       setConfirmed(false);
@@ -242,17 +244,30 @@ export default function PlanningPage({ currentUser, onLogout }: PlanningPageProp
             ...variant,
             tasks: variant.tasks.map((task) => {
               if (task.key !== taskKey) return task;
+              const originalTask = originalVariants
+                .find((candidate) => candidate.key === variantKey)
+                ?.tasks.find((candidate) => candidate.key === taskKey);
               if (
                 Object.prototype.hasOwnProperty.call(values, 'assignee_user_id')
                 && values.assignee_user_id !== task.assignee_user_id
               ) {
+                if (originalTask && values.assignee_user_id === originalTask.assignee_user_id) {
+                  return {
+                    ...task,
+                    ...values,
+                    assignment: { ...originalTask.assignment },
+                    unassigned_reason: originalTask.unassigned_reason,
+                  };
+                }
                 return {
                   ...task,
                   ...values,
                   assignment: {
                     provenance: 'manual',
-                    manual_assignment_kind: task.assignee_user_id ? 'reassigned' : 'assigned',
-                    previous_assignee_user_id: task.assignee_user_id,
+                    manual_assignment_kind: originalTask?.assignee_user_id
+                      ? 'reassigned'
+                      : 'assigned',
+                    previous_assignee_user_id: originalTask?.assignee_user_id || null,
                   },
                   unassigned_reason: values.assignee_user_id
                     ? null
@@ -448,11 +463,16 @@ export default function PlanningPage({ currentUser, onLogout }: PlanningPageProp
           <div className="mt-[14px] space-y-[8px]">
             {selectedVariant.tasks.map((task) => {
               const assignee = employees.find((employee) => employee.user_id === task.assignee_user_id);
+              const assigneeLabel = assignee?.display_name
+                || assignee?.username
+                || (task.assignee_user_id
+                  ? '已指派（员工目录信息受限）'
+                  : '待人工指派');
               return (
                 <div key={task.key} className="flex flex-wrap items-center justify-between gap-[8px] rounded-[10px] border border-[#edf0f5] px-[12px] py-[10px] text-[11px]">
                   <span className="font-medium text-[#464c5e]">{task.title}</span>
-                  <span className={assignee ? 'text-[#596176]' : 'text-[#a65f00]'}>
-                    {assignee?.display_name || assignee?.username || '待人工指派'} · {task.due_date || '日期待定'}
+                  <span className={task.assignee_user_id ? 'text-[#596176]' : 'text-[#a65f00]'}>
+                    <span>{assigneeLabel}</span> · {task.due_date || '日期待定'}
                   </span>
                 </div>
               );

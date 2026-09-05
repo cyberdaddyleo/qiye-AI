@@ -109,6 +109,15 @@ export default function MyWorkPage({
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');
   const [conflictMessage, setConflictMessage] = useState('');
+  const [, setClockRevision] = useState(0);
+
+  useEffect(() => {
+    if (now) return undefined;
+    const timer = window.setInterval(() => {
+      setClockRevision((value) => value + 1);
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [now]);
 
   useEffect(() => {
     let active = true;
@@ -166,7 +175,7 @@ export default function MyWorkPage({
     () => new Map(projects.map((project) => [project.id, project])),
     [projects],
   );
-  const businessNow = useMemo(() => now || new Date(), [now]);
+  const businessNow = now || new Date();
   const executionTasks = tasks.filter((task) => task.assignee_user_id === currentUser.id);
   const reviewTasks = tasks.filter((task) => task.reviewer_user_id === currentUser.id);
   const inProgress = executionTasks.filter((task) => task.status === 'in_progress');

@@ -136,7 +136,7 @@ export default function PlanComparison({
                     compact
                     value={row.utilization_percent}
                     label={`${employeeByUserId.get(userId)?.display_name || employeeByUserId.get(userId)?.username || '真人员工'}利用率`}
-                    detail={employeeByUserId.get(userId)?.display_name || employeeByUserId.get(userId)?.username || userId}
+                    detail={employeeByUserId.get(userId)?.display_name || employeeByUserId.get(userId)?.username || '真人员工信息受限'}
                   />
                 ))}
               </div>
@@ -304,6 +304,10 @@ export default function PlanComparison({
                         )}
                       </p>
                     </div>
+                  ) : task.assignee_user_id ? (
+                    <p className="m-0 text-[10px] font-medium leading-[17px] text-[#596176]">
+                      已指派（员工目录信息受限）
+                    </p>
                   ) : (
                     <p className="m-0 flex items-start gap-[6px] text-[10px] leading-[17px] text-[#a65f00]">
                       <CircleAlert className="mt-[2px] size-[11px] shrink-0" aria-hidden="true" />

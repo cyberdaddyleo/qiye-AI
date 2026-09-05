@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -696,6 +696,7 @@ describe('MyWorkPage', () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.useRealTimers();
     window.localStorage.clear();
   });
 
@@ -759,6 +760,34 @@ describe('MyWorkPage', () => {
     ).toBeTruthy();
     const card = screen.getByRole('button', { name: '打开任务 上海零点边界任务' });
     expect(within(card).getByText('2026-09-04').className).toContain('text-[#d20b0b]');
+  });
+
+  it('updates My Work KPIs and cards across local midnight without remounting', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-04T15:59:30.000Z'));
+    const boundaryTask = task('in_progress', 'task-live-midnight', '跨午夜任务', {
+      due_date: '2026-09-04',
+    });
+    vi.mocked(workbenchApi.listTasks).mockResolvedValueOnce([boundaryTask]);
+
+    const view = renderMyWork({ timeZone: 'Asia/Shanghai' });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(within(screen.getByRole('article', { name: '已逾期' })).getByText('0')).toBeTruthy();
+    const card = screen.getByRole('button', { name: '打开任务 跨午夜任务' });
+    expect(within(card).getByText('2026-09-04').className).not.toContain('text-[#d20b0b]');
+
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+
+    expect(within(screen.getByRole('article', { name: '已逾期' })).getByText('1')).toBeTruthy();
+    expect(within(card).getByText('2026-09-04').className).toContain('text-[#d20b0b]');
+    view.unmount();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('reconciles a 5xx mutation result in My Work and preserves its draft', async () => {

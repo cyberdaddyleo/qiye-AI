@@ -176,6 +176,7 @@
   "方案比较": "Plan Comparison",
   "WBS 已修改，估算未重新计算": "WBS edited; estimates were not recalculated",
   "已修改 WBS": "Edited WBS",
+  "已指派（员工目录信息受限）": "Assigned (employee directory details restricted)",
   "· 以下为人工编辑后的 WBS；对比指标仍为 AI 原始方案估算，未随编辑重新计算。": " · The WBS below includes manual edits; comparison metrics remain the original AI plan estimates and were not recalculated.",
   "真人员工信息受限": "Human employee details restricted",
   "此负责人来自 AI 原始方案推荐。": "This owner came from the original AI plan recommendation.",

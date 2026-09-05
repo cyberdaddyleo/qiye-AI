@@ -107,6 +107,16 @@ const alternateEmployee: EmployeeRead = {
   skills: ['发布管理'],
 };
 
+const secondAlternateEmployee: EmployeeRead = {
+  ...alternateEmployee,
+  id: 'employee-operations',
+  user_id: 'user-operations',
+  username: 'zhaoming',
+  display_name: '赵明',
+  employee_no: 'E004',
+  job_title: '运营经理',
+};
+
 function variant(
   key: PlanVariant['key'],
   name: string,
@@ -522,7 +532,80 @@ describe('PlanningPage', () => {
     ]));
   });
 
-  it('allows an ordinary member to plan a project they own', async () => {
+  it('keeps originally unassigned tasks marked manually assigned across repeated choices', async () => {
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([
+      employee,
+      alternateEmployee,
+      secondAlternateEmployee,
+    ]);
+    const user = userEvent.setup();
+    renderPlanning();
+
+    await generatePlan(user);
+    const wbs = await screen.findByRole('region', { name: '可编辑 WBS' });
+    const assignee = within(wbs).getByLabelText('上线发布负责人');
+    await user.selectOptions(assignee, alternateEmployee.user_id);
+    expect(within(wbs).getByText('人工指定')).toBeTruthy();
+
+    await user.selectOptions(assignee, secondAlternateEmployee.user_id);
+    expect(within(wbs).getByText('人工指定')).toBeTruthy();
+    expect(within(wbs).queryByText('人工改派')).toBeNull();
+  });
+
+  it('keeps AI-assigned tasks marked manually reassigned across repeated choices', async () => {
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([
+      employee,
+      alternateEmployee,
+      secondAlternateEmployee,
+    ]);
+    const user = userEvent.setup();
+    renderPlanning();
+
+    await generatePlan(user);
+    const wbs = await screen.findByRole('region', { name: '可编辑 WBS' });
+    const assignee = within(wbs).getByLabelText('用户研究负责人');
+    await user.selectOptions(assignee, alternateEmployee.user_id);
+    expect(within(wbs).getByText('人工改派')).toBeTruthy();
+
+    await user.selectOptions(assignee, secondAlternateEmployee.user_id);
+    expect(within(wbs).getByText('人工改派')).toBeTruthy();
+    expect(within(wbs).queryByText('人工指定')).toBeNull();
+  });
+
+  it('restores the immutable AI assignment and rationale when reassignment is reverted', async () => {
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([employee, alternateEmployee]);
+    const user = userEvent.setup();
+    renderPlanning();
+
+    await generatePlan(user);
+    const wbs = await screen.findByRole('region', { name: '可编辑 WBS' });
+    const assignee = within(wbs).getByLabelText('用户研究负责人');
+    await user.selectOptions(assignee, alternateEmployee.user_id);
+    expect(within(wbs).getByText('人工改派')).toBeTruthy();
+
+    await user.selectOptions(assignee, employee.user_id);
+    expect(within(wbs).queryByText('人工改派')).toBeNull();
+    expect(within(wbs).getByText('岗位与用户研究技能匹配，且当前仍有可用容量。')).toBeTruthy();
+    expect(screen.queryByText('WBS 已修改，估算未重新计算')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '进入确认' }));
+    expect(screen.queryByText('已修改 WBS')).toBeNull();
+    await user.click(screen.getByRole('checkbox', { name: '我已确认由真人员工承担任务责任' }));
+    await user.click(screen.getByRole('button', { name: '确认并下发' }));
+    await waitFor(() => expect(workbenchApi.dispatchPlan).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(workbenchApi.dispatchPlan).mock.calls[0][1].tasks).toEqual(
+      fallbackPlan.variants[0].tasks.map((task) => ({
+        key: task.key,
+        assignee_user_id: task.assignee_user_id,
+        start_date: task.start_date,
+        due_date: task.due_date,
+        acceptance_criteria: task.acceptance_criteria,
+        depends_on: task.depends_on,
+      })),
+    );
+  });
+
+  it('truthfully carries restricted-directory assignments from owner preview to dispatch', async () => {
     const ownerAccess: WorkbenchAccessRead = {
       ...managerAccess,
       business_role: 'member',
@@ -531,20 +614,64 @@ describe('PlanningPage', () => {
       can_view_all: false,
       managed_department_ids: [],
     };
+    const restrictedAssigneeIds = ['user-restricted-research', 'user-restricted-launch'];
+    const restrictedPlan: PlanRead = {
+      ...fallbackPlan,
+      variants: fallbackPlan.variants.map((candidate) => ({
+        ...candidate,
+        utilization: {
+          [restrictedAssigneeIds[0]]: {
+            assigned_days: 2,
+            capacity_percent: 80,
+            utilization_percent: 75,
+          },
+          [restrictedAssigneeIds[1]]: {
+            assigned_days: 1,
+            capacity_percent: 70,
+            utilization_percent: 60,
+          },
+        },
+        tasks: candidate.tasks.map((task, index) => ({
+          ...task,
+          assignee_user_id: restrictedAssigneeIds[index],
+          assignment: { rationale: '受限目录中的内部匹配依据' },
+          unassigned_reason: null,
+        })),
+      })),
+    };
     vi.mocked(workbenchApi.getAccess).mockResolvedValueOnce(ownerAccess);
     vi.mocked(workbenchApi.listEmployees).mockRejectedValueOnce(
       new ApiError(403, '{"detail":"Forbidden"}', 'Forbidden'),
     );
+    vi.mocked(workbenchApi.previewPlan).mockResolvedValueOnce(restrictedPlan);
     const user = userEvent.setup();
     renderPlanning('/enterprise/planning?project_id=project-launch', manager);
 
     expect(await screen.findByRole('heading', { name: '规划目标与约束' })).toBeTruthy();
     await generatePlan(user);
     await screen.findByText('内置规划引擎');
+    const wbs = screen.getByRole('region', { name: '可编辑 WBS' });
+    expect(within(wbs).getAllByText('已指派（员工目录信息受限）')).toHaveLength(2);
+    expect(within(wbs).getAllByRole('option', {
+      name: '当前真人负责人 · 目录信息受限',
+    })).toHaveLength(2);
+    expect(within(wbs).queryByText(/暂无合适员工/)).toBeNull();
+    for (const userId of restrictedAssigneeIds) {
+      expect(document.body.textContent).not.toContain(userId);
+    }
+
     await user.click(screen.getByRole('button', { name: '进入确认' }));
+    expect(screen.getByText('真人负责人 2 人 · 待人工指派 0 项')).toBeTruthy();
+    expect(screen.getAllByText('已指派（员工目录信息受限）')).toHaveLength(2);
+    for (const userId of restrictedAssigneeIds) {
+      expect(document.body.textContent).not.toContain(userId);
+    }
     await user.click(screen.getByRole('checkbox', { name: '我已确认由真人员工承担任务责任' }));
     await user.click(screen.getByRole('button', { name: '确认并下发' }));
 
     await waitFor(() => expect(workbenchApi.dispatchPlan).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(workbenchApi.dispatchPlan).mock.calls[0][1].tasks.map(
+      (task) => task.assignee_user_id,
+    )).toEqual(restrictedAssigneeIds);
   });
 });
