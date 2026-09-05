@@ -70,9 +70,11 @@ import ToolsPage, {
   ToolNewPage,
   ToolTestPage,
 } from "./pages/ToolsPage";
-import WorkbenchLayout from "./pages/workbench/WorkbenchLayout";
 import WorkbenchDashboardPage from "./pages/workbench/WorkbenchDashboardPage";
 import ProjectsPage from "./pages/workbench/ProjectsPage";
+import PlanningPage from "./pages/workbench/PlanningPage";
+import TasksPage from "./pages/workbench/TasksPage";
+import MyWorkPage from "./pages/workbench/MyWorkPage";
 import OrganizationPage from "./pages/workbench/OrganizationPage";
 import { useIsMobile } from "./hooks/use-mobile";
 import {
@@ -612,9 +614,7 @@ function Shell({
               <Route
                 path={`${EnterpriseRoute.Planning}/*`}
                 element={
-                  <WorkbenchLayout
-                    title="AI 调度中心"
-                    description="将目标拆解为可解释、可确认的执行方案"
+                  <PlanningPage
                     currentUser={auth.user}
                     onLogout={onLogout}
                   />
@@ -623,9 +623,7 @@ function Shell({
               <Route
                 path={`${EnterpriseRoute.Tasks}/*`}
                 element={
-                  <WorkbenchLayout
-                    title="任务中心"
-                    description="查看任务状态、依赖、交付与审核记录"
+                  <TasksPage
                     currentUser={auth.user}
                     onLogout={onLogout}
                   />
@@ -634,9 +632,7 @@ function Shell({
               <Route
                 path={`${EnterpriseRoute.MyWork}/*`}
                 element={
-                  <WorkbenchLayout
-                    title="员工工作台"
-                    description="聚焦个人优先事项、待交付任务与协作动态"
+                  <MyWorkPage
                     currentUser={auth.user}
                     onLogout={onLogout}
                   />

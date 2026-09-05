@@ -101,6 +101,32 @@ function stubShellFetch() {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes('/api/auth/me')) return jsonResponse(authUser);
+    if (url.includes('/api/enterprise/workbench/access')) {
+      return jsonResponse({
+        tenant_id: authUser.tenant_id,
+        user_id: authUser.id,
+        business_role: 'admin',
+        directory_scope: 'all',
+        can_create_project: true,
+      });
+    }
+    if (url.includes('/api/enterprise/workbench/dashboard')) {
+      return jsonResponse({
+        tenant_id: authUser.tenant_id,
+        project_count: 0,
+        task_counts: {},
+        employee_count: 0,
+        pending_review_count: 0,
+        at_risk_project_count: 0,
+        department_loads: [],
+        workload_rows: [],
+        pending_reviews: [],
+        at_risk_tasks: [],
+        project_summaries: [],
+        recent_events: [],
+      });
+    }
+    if (url.includes('/api/enterprise/workbench/')) return jsonResponse([]);
     if (url.includes('/api/enterprise/agents')) return jsonResponse([agent]);
     if (url.includes('/api/enterprise/teams')) return jsonResponse([]);
     if (url.includes('/api/enterprise/model-configs')) return jsonResponse([{ id: 'model-1' }]);
@@ -158,18 +184,19 @@ describe('enterprise workbench routing', () => {
     expect(window.location.pathname).toBe(EnterpriseRoute.Workbench);
 
     const destinations = [
-      [EnterpriseRoute.Workbench, '企业工作台'],
-      [EnterpriseRoute.Projects, '项目中心'],
-      [EnterpriseRoute.Planning, 'AI 调度中心'],
-      [EnterpriseRoute.Tasks, '任务中心'],
-      [EnterpriseRoute.MyWork, '员工工作台'],
-      [EnterpriseRoute.Organization, '组织与权限'],
+      [EnterpriseRoute.Workbench, '企业工作台', null],
+      [EnterpriseRoute.Projects, '项目中心', '还没有可见项目'],
+      [EnterpriseRoute.Planning, 'AI 调度中心', '还没有可规划项目'],
+      [EnterpriseRoute.Tasks, '任务中心', '当前筛选下没有任务'],
+      [EnterpriseRoute.MyWork, '员工工作台', '今天没有待处理工作'],
+      [EnterpriseRoute.Organization, '组织与权限', null],
     ] as const;
 
-    for (const [route, label] of destinations) {
+    for (const [route, label, pageContent] of destinations) {
       const link = screen.getByRole('button', { name: label });
       await user.click(link);
       await screen.findByRole('heading', { level: 1, name: label });
+      if (pageContent) await screen.findByRole('heading', { name: pageContent });
       expect(window.location.pathname).toBe(route);
       expect(link.getAttribute('data-active')).toBe('true');
     }
