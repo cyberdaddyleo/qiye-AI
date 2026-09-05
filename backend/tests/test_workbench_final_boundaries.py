@@ -1695,13 +1695,12 @@ def test_department_update_explicit_null_for_non_nullable_fields_returns_422(
     workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
     field: str,
 ) -> None:
-    _, _, rows = workbench_boundary
-    with TestClient(app, raise_server_exceptions=False) as client:
-        response = client.patch(
-            f"/api/enterprise/workbench/departments/{rows['engineering']['id']}",
-            headers=_headers(rows["admin"]),
-            json={"tenant_id": "tenant_a", field: None},
-        )
+    client, _, rows = workbench_boundary
+    response = client.patch(
+        f"/api/enterprise/workbench/departments/{rows['engineering']['id']}",
+        headers=_headers(rows["admin"]),
+        json={"tenant_id": "tenant_a", field: None},
+    )
     assert response.status_code == 422, response.text
     assert any(item["loc"][-1] == field for item in response.json()["detail"])
 
@@ -1714,13 +1713,12 @@ def test_employee_update_explicit_null_for_non_nullable_fields_returns_422(
     workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
     field: str,
 ) -> None:
-    _, _, rows = workbench_boundary
-    with TestClient(app, raise_server_exceptions=False) as client:
-        response = client.patch(
-            f"/api/enterprise/workbench/employees/{rows['profile_member']['id']}",
-            headers=_headers(rows["admin"]),
-            json={"tenant_id": "tenant_a", field: None},
-        )
+    client, _, rows = workbench_boundary
+    response = client.patch(
+        f"/api/enterprise/workbench/employees/{rows['profile_member']['id']}",
+        headers=_headers(rows["admin"]),
+        json={"tenant_id": "tenant_a", field: None},
+    )
     assert response.status_code == 422, response.text
     assert any(item["loc"][-1] == field for item in response.json()["detail"])
 
