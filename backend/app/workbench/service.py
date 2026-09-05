@@ -266,9 +266,11 @@ def update_department(
 ) -> Department:
     values = dict(values)
     old_manager_user_id = department.manager_user_id
+    old_status = department.status
     manager_changed = "manager_user_id" in values
+    manager_invariant_changed = manager_changed or "status" in values
     new_manager_user_id = values.get("manager_user_id", old_manager_user_id)
-    target_status = values.get("status", department.status)
+    target_status = values.get("status", old_status)
     new_manager: EmployeeProfile | None = None
     if manager_changed and new_manager_user_id and target_status != "active":
         raise HTTPException(
@@ -294,13 +296,14 @@ def update_department(
             )
 
     now = utc_now()
-    if manager_changed:
+    if manager_invariant_changed:
         result = db.exec(
             sa_update(Department)
             .where(
                 Department.id == department.id,
                 Department.tenant_id == department.tenant_id,
                 Department.manager_user_id == old_manager_user_id,
+                Department.status == old_status,
             )
             .values(**values, updated_at=now)
             .execution_options(synchronize_session=False)

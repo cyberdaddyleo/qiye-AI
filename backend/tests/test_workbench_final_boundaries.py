@@ -1917,6 +1917,82 @@ def test_department_manager_update_uses_compare_and_swap_before_role_sync(
         assert losing_manager.business_role == "member"
 
 
+def test_stale_active_department_cannot_assign_manager_after_archive(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    _, engine, rows = workbench_boundary
+    archiver = Session(engine)
+    stale = Session(engine)
+    try:
+        archived_department = archiver.get(Department, rows["engineering"]["id"])
+        stale_department = stale.get(Department, rows["engineering"]["id"])
+        assert archived_department is not None and stale_department is not None
+        assert archived_department.status == "active"
+        assert stale_department.status == "active"
+
+        update_department(archiver, archived_department, {"status": "archived"})
+        with pytest.raises(HTTPException) as conflict:
+            update_department(
+                stale,
+                stale_department,
+                {"manager_user_id": rows["colleague"]["id"]},
+            )
+        assert conflict.value.status_code == 409
+    finally:
+        archiver.close()
+        stale.close()
+
+    with Session(engine) as db:
+        department = db.get(Department, rows["engineering"]["id"])
+        previous_manager = db.get(EmployeeProfile, rows["profile_manager"]["id"])
+        losing_candidate = db.get(EmployeeProfile, rows["profile_colleague"]["id"])
+        assert department is not None
+        assert previous_manager is not None
+        assert losing_candidate is not None
+        assert department.status == "archived"
+        assert department.manager_user_id == rows["manager"]["id"]
+        assert previous_manager.business_role == "member"
+        assert losing_candidate.business_role == "member"
+
+
+def test_stale_department_cannot_archive_after_manager_change(
+    workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
+) -> None:
+    _, engine, rows = workbench_boundary
+    assigner = Session(engine)
+    stale = Session(engine)
+    try:
+        assigned_department = assigner.get(Department, rows["engineering"]["id"])
+        stale_department = stale.get(Department, rows["engineering"]["id"])
+        assert assigned_department is not None and stale_department is not None
+        assert assigned_department.manager_user_id == rows["manager"]["id"]
+        assert stale_department.manager_user_id == rows["manager"]["id"]
+
+        update_department(
+            assigner,
+            assigned_department,
+            {"manager_user_id": rows["colleague"]["id"]},
+        )
+        with pytest.raises(HTTPException) as conflict:
+            update_department(stale, stale_department, {"status": "archived"})
+        assert conflict.value.status_code == 409
+    finally:
+        assigner.close()
+        stale.close()
+
+    with Session(engine) as db:
+        department = db.get(Department, rows["engineering"]["id"])
+        previous_manager = db.get(EmployeeProfile, rows["profile_manager"]["id"])
+        winning_manager = db.get(EmployeeProfile, rows["profile_colleague"]["id"])
+        assert department is not None
+        assert previous_manager is not None
+        assert winning_manager is not None
+        assert department.status == "active"
+        assert department.manager_user_id == rows["colleague"]["id"]
+        assert previous_manager.business_role == "member"
+        assert winning_manager.business_role == "manager"
+
+
 def test_task_page_returns_exact_total_without_changing_legacy_list_contract(
     workbench_boundary: tuple[TestClient, Engine, dict[str, dict[str, str]]],
 ) -> None:
