@@ -6,6 +6,7 @@
     "source_host": "local"
   },
   "selected_agent_names": [
+    "CEO",
     "销售",
     "市场",
     "采购",
@@ -227,6 +228,26 @@
       "status": "active",
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:00.000000"
+    },
+    {
+      "id": "agent_preset_ceo_001",
+      "tenant_id": "tenant_demo",
+      "name": "CEO",
+      "description": "负责统筹公司战略规划、经营目标复盘、资源配置与关键决策支持，输出结构化决策简报；涉及高风险事项或对外承诺时明确要求人工确认。",
+      "is_overall": 0,
+      "status": "active",
+      "metadata_json": {
+        "avatar_kind": "preset",
+        "avatar_preset": "executive-compass",
+        "avatar_text": "总",
+        "avatar_tone": "blue",
+        "expertise_tags": ["战略规划", "经营复盘", "关键决策"],
+        "role_name": "首席执行官",
+        "role_key": "ceo-strategist",
+        "system_prompt_summary": "提供战略经营决策支持，高风险或对外承诺需人工确认。",
+        "work_modes": ["问答", "战略分析"],
+        "work_styles": ["全局视角", "数据驱动", "风险透明"]
+      }
     }
   ],
   "knowledge_bases": [
@@ -339,6 +360,14 @@
       "status": "active",
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:00.000000"
+    },
+    {
+      "id": "kb_preset_ceo_001",
+      "tenant_id": "tenant_demo",
+      "name": "经营管理通用知识库",
+      "description": "支持战略规划、经营复盘、资源配置和关键决策支持的通用知识。",
+      "status": "active",
+      "metadata_json": {"owner_agent_id": "agent_preset_ceo_001", "scope": "agent_private", "visibility": "agent_private", "source_filename": "CEO-经营管理通用知识库.md"}
     }
   ],
   "knowledge_base_versions": [
@@ -431,6 +460,16 @@
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:00.000000",
       "version": "1.0.0"
+    },
+    {
+      "id": "kbver_kb_preset_ceo_001_1_0_0",
+      "tenant_id": "tenant_demo",
+      "knowledge_base_id": "kb_preset_ceo_001",
+      "version": "1.0.0",
+      "name": "经营管理通用知识库",
+      "description": "支持战略规划、经营复盘、资源配置和关键决策支持的通用知识。",
+      "status": "active",
+      "metadata_json": {"owner_agent_id": "agent_preset_ceo_001", "scope": "agent_private", "visibility": "agent_private"}
     }
   ],
   "knowledge_documents": [
@@ -538,6 +577,19 @@
       "tenant_id": "tenant_demo",
       "title": "数据分析-经营分析通用指南",
       "updated_at": "2026-08-18 00:00:00.000000"
+    },
+    {
+      "id": "kdoc_preset_ceo_001",
+      "tenant_id": "tenant_demo",
+      "knowledge_base_id": "kb_preset_ceo_001",
+      "knowledge_base_version_id": "kbver_kb_preset_ceo_001_1_0_0",
+      "filename": "CEO-经营管理通用知识库.md",
+      "file_type": "md",
+      "title": "经营管理通用知识库",
+      "status": "ready",
+      "bucket_count": 1,
+      "chunk_count": 1,
+      "metadata_json": {"owner_agent_id": "agent_preset_ceo_001"}
     }
   ],
   "knowledge_buckets": [
@@ -625,6 +677,18 @@
       "title": "指标口径与经营分析",
       "token_estimate": 180,
       "updated_at": "2026-08-18 00:00:00.000000"
+    },
+    {
+      "id": "kbucket_preset_ceo_001",
+      "tenant_id": "tenant_demo",
+      "knowledge_base_id": "kb_preset_ceo_001",
+      "knowledge_base_version_id": "kbver_kb_preset_ceo_001_1_0_0",
+      "document_id": "kdoc_preset_ceo_001",
+      "bucket_key": "bucket_ceo_management",
+      "title": "战略与经营决策",
+      "summary": "战略规划、经营复盘和资源配置必须基于事实、假设和可验证的行动。",
+      "token_estimate": 100,
+      "metadata_json": {"section_id": "sec_1", "section_order": 1}
     }
   ],
   "knowledge_chunks": [
@@ -717,6 +781,19 @@
       "summary": "经营分析先固定指标、时间、粒度和对比口径，再区分事实、假设与限制，形成可验证的后续动作。",
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:00.000000"
+    },
+    {
+      "id": "kchunk_preset_ceo_001",
+      "tenant_id": "tenant_demo",
+      "knowledge_base_id": "kb_preset_ceo_001",
+      "knowledge_base_version_id": "kbver_kb_preset_ceo_001_1_0_0",
+      "document_id": "kdoc_preset_ceo_001",
+      "bucket_id": "kbucket_preset_ceo_001",
+      "chunk_index": 0,
+      "content": "# 战略与经营决策\n\n1. 战略规划应明确目标、约束、假设与衡量指标。\n2. 经营复盘先陈述事实，再分析原因和待验证假设。\n3. 资源配置应说明取舍、风险和责任人。\n4. 高风险决策或对外承诺必须由有权限人员人工确认。",
+      "summary": "战略经营简报区分事实、假设与建议，并为高风险或对外承诺保留人工确认。",
+      "source_ref": "CEO-经营管理通用知识库.md / 战略与经营决策 / evidence 1",
+      "metadata_json": {"section_id": "sec_1", "section_title": "战略与经营决策"}
     }
   ],
   "knowledge_concepts": [],
@@ -1191,6 +1268,18 @@
       "status": "succeeded",
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:01.000000"
+    },
+    {
+      "id": "kjob_preset_ceo_001",
+      "tenant_id": "tenant_demo",
+      "knowledge_base_id": "kb_preset_ceo_001",
+      "knowledge_base_version_id": "kbver_kb_preset_ceo_001_1_0_0",
+      "document_id": "kdoc_preset_ceo_001",
+      "filename": "CEO-经营管理通用知识库.md",
+      "status": "succeeded",
+      "stage": "done",
+      "progress": 1.0,
+      "metadata_json": {"title": "经营管理通用知识库", "stage_stats": {"bucket_count": 1, "chunk_count": 1, "concept_count": 0}}
     }
   ],
   "skills": [
@@ -1773,6 +1862,36 @@
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:00.000000",
       "version": "1.0.0"
+    },
+    {
+      "id": "skill_preset_ceo_001",
+      "tenant_id": "tenant_demo",
+      "skill_id": "ceo_strategy_brief_v1",
+      "version": "1.0.0",
+      "name": "战略经营决策简报",
+      "business_domain": "战略与经营管理",
+      "description": "汇总战略规划、经营复盘、资源配置和关键决策支持信息；高风险决策或对外承诺必须人工确认。",
+      "status": "published",
+      "content_json": {
+        "skill_id": "ceo_strategy_brief_v1",
+        "name": "战略经营决策简报",
+        "version": "1.0.0",
+        "business_domain": "战略与经营管理",
+        "description": "输出可追溯的战略经营决策简报，高风险或对外承诺必须人工确认。",
+        "trigger_intents": ["制定战略规划", "进行经营复盘", "资源配置决策"],
+        "user_utterance_examples": ["帮我准备季度经营复盘", "给我资源配置建议"],
+        "goal": ["梳理战略规划", "复盘经营表现", "支持关键决策"],
+        "required_info": ["decision_context", "business_period"],
+        "response_rules": ["区分事实、假设和建议。", "高风险决策或对外承诺必须提示人工确认。"],
+        "nodes": [
+          {"node_id": "n1_collect", "type": "collect_info", "name": "收集经营决策背景", "instruction": "收集决策背景、经营周期、目标、约束和已知风险。", "expected_user_info": ["decision_context", "business_period"], "allowed_actions": ["extract_slots"]},
+          {"node_id": "n2_brief", "type": "response", "name": "生成战略经营简报", "instruction": "依据知识库整理战略规划、经营复盘、资源配置和关键决策支持；高风险或对外承诺只提供待确认方案，并要求人工确认。", "allowed_actions": ["answer_user"], "knowledge_scope": {"resource_types": ["knowledge_base"]}}
+        ],
+        "edges": [{"source_node_id": "n1_collect", "next_node_id": "n2_brief", "condition": "default", "priority": 1, "label": "背景已收集"}],
+        "start_node_id": "n1_collect",
+        "terminal_node_ids": ["n2_brief"],
+        "interruption_policy": {"allow_interrupt": "true", "strategy": "resume_from_last_state", "description": "允许补充经营数据或决策约束。"}
+      }
     }
   ],
   "skill_versions": [
@@ -2355,6 +2474,36 @@
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:00.000000",
       "version": "1.0.0"
+    },
+    {
+      "id": "skillver_preset_ceo_001_1_0_0",
+      "tenant_id": "tenant_demo",
+      "skill_id": "ceo_strategy_brief_v1",
+      "version": "1.0.0",
+      "name": "战略经营决策简报",
+      "business_domain": "战略与经营管理",
+      "description": "汇总战略规划、经营复盘、资源配置和关键决策支持信息；高风险决策或对外承诺必须人工确认。",
+      "status": "published",
+      "content_json": {
+        "skill_id": "ceo_strategy_brief_v1",
+        "name": "战略经营决策简报",
+        "version": "1.0.0",
+        "business_domain": "战略与经营管理",
+        "description": "输出可追溯的战略经营决策简报，高风险或对外承诺必须人工确认。",
+        "trigger_intents": ["制定战略规划", "进行经营复盘", "资源配置决策"],
+        "user_utterance_examples": ["帮我准备季度经营复盘", "给我资源配置建议"],
+        "goal": ["梳理战略规划", "复盘经营表现", "支持关键决策"],
+        "required_info": ["decision_context", "business_period"],
+        "response_rules": ["区分事实、假设和建议。", "高风险决策或对外承诺必须提示人工确认。"],
+        "nodes": [
+          {"node_id": "n1_collect", "type": "collect_info", "name": "收集经营决策背景", "instruction": "收集决策背景、经营周期、目标、约束和已知风险。", "expected_user_info": ["decision_context", "business_period"], "allowed_actions": ["extract_slots"]},
+          {"node_id": "n2_brief", "type": "response", "name": "生成战略经营简报", "instruction": "依据知识库整理战略规划、经营复盘、资源配置和关键决策支持；高风险或对外承诺只提供待确认方案，并要求人工确认。", "allowed_actions": ["answer_user"], "knowledge_scope": {"resource_types": ["knowledge_base"]}}
+        ],
+        "edges": [{"source_node_id": "n1_collect", "next_node_id": "n2_brief", "condition": "default", "priority": 1, "label": "背景已收集"}],
+        "start_node_id": "n1_collect",
+        "terminal_node_ids": ["n2_brief"],
+        "interruption_policy": {"allow_interrupt": "true", "strategy": "resume_from_last_state", "description": "允许补充经营数据或决策约束。"}
+      }
     }
   ],
   "tools": [],
@@ -2529,6 +2678,24 @@
       "status": "active",
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:00.000000"
+    },
+    {
+      "id": "agentres_preset_ceo_kb_001",
+      "tenant_id": "tenant_demo",
+      "agent_id": "agent_preset_ceo_001",
+      "resource_type": "knowledge_base",
+      "resource_id": "kb_preset_ceo_001",
+      "status": "active",
+      "metadata_json": {"owner_agent_id": "agent_preset_ceo_001", "scope": "agent_private", "visibility": "agent_private"}
+    },
+    {
+      "id": "agentres_preset_ceo_skill_001",
+      "tenant_id": "tenant_demo",
+      "agent_id": "agent_preset_ceo_001",
+      "resource_type": "skill",
+      "resource_id": "skill_preset_ceo_001",
+      "status": "active",
+      "metadata_json": {"owner_agent_id": "agent_preset_ceo_001", "scope": "agent_private", "visibility": "agent_private"}
     }
   ],
   "agent_skill_branches": [
@@ -3186,6 +3353,35 @@
       "sync_state": "synced",
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:00.000000"
+    },
+    {
+      "id": "agentbranch_agent_preset_ceo_001_ceo_strategy_brief_v1",
+      "tenant_id": "tenant_demo",
+      "agent_id": "agent_preset_ceo_001",
+      "skill_id": "ceo_strategy_brief_v1",
+      "source_skill_id": "skill_preset_ceo_001",
+      "base_version": "1.0.0",
+      "head_version": "1.0.0",
+      "status": "active",
+      "sync_state": "synced",
+      "metadata_json": {"owner_agent_id": "agent_preset_ceo_001", "scope": "agent_private", "visibility": "agent_private"},
+      "content_json": {
+        "skill_id": "ceo_strategy_brief_v1", "name": "战略经营决策简报", "version": "1.0.0", "business_domain": "战略与经营管理",
+        "description": "输出可追溯的战略经营决策简报，高风险或对外承诺必须人工确认。",
+        "trigger_intents": ["制定战略规划", "进行经营复盘", "资源配置决策"],
+        "user_utterance_examples": ["帮我准备季度经营复盘", "给我资源配置建议"],
+        "goal": ["梳理战略规划", "复盘经营表现", "支持关键决策"],
+        "required_info": ["decision_context", "business_period"],
+        "response_rules": ["区分事实、假设和建议。", "高风险决策或对外承诺必须提示人工确认。"],
+        "nodes": [
+          {"node_id": "n1_collect", "type": "collect_info", "name": "收集经营决策背景", "instruction": "收集决策背景、经营周期、目标、约束和已知风险。", "expected_user_info": ["decision_context", "business_period"], "allowed_actions": ["extract_slots"]},
+          {"node_id": "n2_brief", "type": "response", "name": "生成战略经营简报", "instruction": "依据知识库整理战略规划、经营复盘、资源配置和关键决策支持；高风险或对外承诺只提供待确认方案，并要求人工确认。", "allowed_actions": ["answer_user"], "knowledge_scope": {"resource_types": ["knowledge_base"]}}
+        ],
+        "edges": [{"source_node_id": "n1_collect", "next_node_id": "n2_brief", "condition": "default", "priority": 1, "label": "背景已收集"}],
+        "start_node_id": "n1_collect",
+        "terminal_node_ids": ["n2_brief"],
+        "interruption_policy": {"allow_interrupt": "true", "strategy": "resume_from_last_state", "description": "允许补充经营数据或决策约束。"}
+      }
     }
   ],
   "agent_skill_branch_versions": [
@@ -3778,6 +3974,35 @@
       "tenant_id": "tenant_demo",
       "updated_at": "2026-08-18 00:00:00.000000",
       "version": "1.0.0"
+    },
+    {
+      "id": "agentbranchver_agent_preset_ceo_001_ceo_strategy_brief_v1_1_0_0",
+      "tenant_id": "tenant_demo",
+      "agent_id": "agent_preset_ceo_001",
+      "skill_id": "ceo_strategy_brief_v1",
+      "source_skill_id": "skill_preset_ceo_001",
+      "version": "1.0.0",
+      "base_version": "1.0.0",
+      "change_summary": "初始化分支",
+      "status": "active",
+      "sync_state": "synced",
+      "content_json": {
+        "skill_id": "ceo_strategy_brief_v1", "name": "战略经营决策简报", "version": "1.0.0", "business_domain": "战略与经营管理",
+        "description": "输出可追溯的战略经营决策简报，高风险或对外承诺必须人工确认。",
+        "trigger_intents": ["制定战略规划", "进行经营复盘", "资源配置决策"],
+        "user_utterance_examples": ["帮我准备季度经营复盘", "给我资源配置建议"],
+        "goal": ["梳理战略规划", "复盘经营表现", "支持关键决策"],
+        "required_info": ["decision_context", "business_period"],
+        "response_rules": ["区分事实、假设和建议。", "高风险决策或对外承诺必须提示人工确认。"],
+        "nodes": [
+          {"node_id": "n1_collect", "type": "collect_info", "name": "收集经营决策背景", "instruction": "收集决策背景、经营周期、目标、约束和已知风险。", "expected_user_info": ["decision_context", "business_period"], "allowed_actions": ["extract_slots"]},
+          {"node_id": "n2_brief", "type": "response", "name": "生成战略经营简报", "instruction": "依据知识库整理战略规划、经营复盘、资源配置和关键决策支持；高风险或对外承诺只提供待确认方案，并要求人工确认。", "allowed_actions": ["answer_user"], "knowledge_scope": {"resource_types": ["knowledge_base"]}}
+        ],
+        "edges": [{"source_node_id": "n1_collect", "next_node_id": "n2_brief", "condition": "default", "priority": 1, "label": "背景已收集"}],
+        "start_node_id": "n1_collect",
+        "terminal_node_ids": ["n2_brief"],
+        "interruption_policy": {"allow_interrupt": "true", "strategy": "resume_from_last_state", "description": "允许补充经营数据或决策约束。"}
+      }
     }
   ]
 }

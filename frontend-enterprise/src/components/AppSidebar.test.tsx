@@ -107,6 +107,7 @@ describe('AppSidebar agent switcher team group', () => {
     const onSelectAgent = vi.fn();
     renderSidebar({ selectedAgentId: 'agent-1', onSelectAgent });
 
+    expect(screen.getByRole('button', { name: '开放广场' })).toBeTruthy();
     await user.click(screen.getByLabelText('切换当前员工'));
     const menu = await screen.findByRole('menu');
     // 分组标签与团队项上的 Badge 都写作「团队」。
@@ -209,6 +210,9 @@ describe('AppSidebar chat variant group conversations', () => {
   it('renders employee sessions and team groups as different conversation types', () => {
     renderChatSidebar();
 
+    expect(screen.getAllByRole('button', { name: '数字员工广场' }).some(
+      (item) => item.getAttribute('aria-label') === '数字员工广场',
+    )).toBe(true);
     expect(screen.getByLabelText('群聊')).toBeTruthy();
     const groupRow = screen.getByText('增长团队').closest('[role="button"]');
     expect(groupRow?.textContent).toContain('2 位成员 · 团队群聊');

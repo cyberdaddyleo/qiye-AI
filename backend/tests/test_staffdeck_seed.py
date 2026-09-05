@@ -9,6 +9,7 @@ from app.api.agents import list_agents
 from app.api.knowledge_bases import list_knowledge_bases
 from app.db import staffdeck_seed
 from app.db.models import (
+    AgentKnowledgeBranch,
     AgentProfile,
     AgentResourceBinding,
     AgentSkillBranch,
@@ -27,6 +28,7 @@ from app.db.seed import seed_demo_data
 from app.skills.skill_schema import SkillCard
 
 EXPECTED_KNOWLEDGE_COUNTS = {
+    "CEO": 1,
     "IT": 2,
     "人事": 3,
     "法务": 4,
@@ -40,6 +42,7 @@ EXPECTED_KNOWLEDGE_COUNTS = {
 }
 
 EXPECTED_EXPANDED_EMPLOYEE_PROFILES = {
+    "CEO": ("首席执行官", "executive-compass", "ceo-strategist"),
     "销售": ("客户拓展顾问", "sales-handshake", "sales-advisor"),
     "市场": ("市场内容策划", "marketing-spark", "marketing-planner"),
     "采购": ("采购协同专员", "procurement-check", "procurement-coordinator"),
@@ -93,6 +96,10 @@ def test_staffdeck_seed_requires_every_bundled_fixture(tmp_path) -> None:
 
 def test_expanded_staffdeck_skills_match_runtime_schema() -> None:
     data = json.loads(staffdeck_seed.EXPANDED_FIXTURE_PATH.read_text(encoding="utf-8"))
+    published_content = {
+        row["skill_id"]: row["content_json"]
+        for row in data["skills"]
+    }
 
     for key in (
         "skills",
@@ -104,6 +111,16 @@ def test_expanded_staffdeck_skills_match_runtime_schema() -> None:
         assert len(rows) == len(EXPECTED_EXPANDED_EMPLOYEE_PROFILES)
         for row in rows:
             SkillCard.model_validate(row["content_json"])
+
+    for key in ("agent_skill_branches", "agent_skill_branch_versions"):
+        for row in data[key]:
+            assert row["content_json"] == published_content[row["skill_id"]]
+
+    ceo_chunk = next(
+        row for row in data["knowledge_chunks"] if row["id"] == "kchunk_preset_ceo_001"
+    )
+    assert "\n\n1. " in ceo_chunk["content"]
+    assert r"\n" not in ceo_chunk["content"]
 
 
 def test_staffdeck_seed_exposes_selected_agents_with_knowledge_bases() -> None:
@@ -217,6 +234,78 @@ def test_staffdeck_seed_adds_expanded_employee_profiles_idempotently() -> None:
                     )
                 ).all()
             ) == 1
+
+
+def test_staffdeck_seed_adds_ceo_with_complete_resource_branches() -> None:
+    with _seeded_session() as db:
+        seed_demo_data(db)
+        db.commit()
+
+        ceo = db.get(AgentProfile, "agent_preset_ceo_001")
+        assert ceo is not None
+        assert ceo.name == "CEO"
+        assert ceo.description == (
+            "负责统筹公司战略规划、经营目标复盘、资源配置与关键决策支持，"
+            "输出结构化决策简报；涉及高风险事项或对外承诺时明确要求人工确认。"
+        )
+        assert ceo.metadata_json["role_name"] == "首席执行官"
+        assert ceo.metadata_json["role_key"] == "ceo-strategist"
+        assert ceo.metadata_json["avatar_preset"] == "executive-compass"
+        assert ceo.metadata_json["avatar_text"] == "总"
+        assert ceo.metadata_json["avatar_tone"] == "blue"
+        assert ceo.metadata_json["work_styles"] == ["全局视角", "数据驱动", "风险透明"]
+        assert ceo.metadata_json["expertise_tags"] == ["战略规划", "经营复盘", "关键决策"]
+        assert ceo.metadata_json["work_modes"] == ["问答", "战略分析"]
+
+        bindings = db.exec(
+            select(AgentResourceBinding).where(
+                AgentResourceBinding.tenant_id == "tenant_demo",
+                AgentResourceBinding.agent_id == ceo.id,
+                AgentResourceBinding.status == "active",
+            )
+        ).all()
+        assert {(binding.resource_type, binding.resource_id) for binding in bindings} == {
+            ("knowledge_base", "kb_preset_ceo_001"),
+            ("skill", "skill_preset_ceo_001"),
+        }
+
+        skill = db.get(Skill, "skill_preset_ceo_001")
+        assert skill is not None
+        assert skill.skill_id == "ceo_strategy_brief_v1"
+        assert skill.name == "战略经营决策简报"
+        assert "战略规划" in skill.description
+        assert "人工确认" in skill.description
+
+        knowledge_base = db.get(KnowledgeBaseVersion, "kbver_kb_preset_ceo_001_1_0_0")
+        assert knowledge_base is not None
+        assert knowledge_base.knowledge_base_id == "kb_preset_ceo_001"
+        assert knowledge_base.name == "经营管理通用知识库"
+
+        assert len(
+            db.exec(
+                select(AgentSkillBranch).where(
+                    AgentSkillBranch.agent_id == ceo.id,
+                    AgentSkillBranch.skill_id == "ceo_strategy_brief_v1",
+                )
+            ).all()
+        ) == 1
+        assert len(
+            db.exec(
+                select(AgentSkillBranchVersion).where(
+                    AgentSkillBranchVersion.agent_id == ceo.id,
+                    AgentSkillBranchVersion.skill_id == "ceo_strategy_brief_v1",
+                )
+            ).all()
+        ) == 1
+        knowledge_branches = db.exec(
+            select(AgentKnowledgeBranch).where(
+                AgentKnowledgeBranch.agent_id == ceo.id,
+                AgentKnowledgeBranch.knowledge_base_id == "kb_preset_ceo_001",
+            )
+        ).all()
+        assert len(knowledge_branches) == 1
+        assert knowledge_branches[0].base_version == "1.0.0"
+        assert knowledge_branches[0].head_version == "1.0.0"
 
 
 def test_staffdeck_seed_applies_reliability_defaults_to_existing_rows() -> None:

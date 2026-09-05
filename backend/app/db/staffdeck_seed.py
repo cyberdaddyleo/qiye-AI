@@ -47,6 +47,7 @@ EXPANDED_FIXTURE_PATH = (
 )
 
 SELECTED_AGENT_NAMES = {
+    "CEO",
     "IT",
     "人事",
     "法务",

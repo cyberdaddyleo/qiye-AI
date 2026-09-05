@@ -49,4 +49,39 @@ describe('expanded employee presets', () => {
 
     expect(new Set(images)).toHaveLength(EXPANDED_EMPLOYEES.length);
   });
+
+  it('registers a CEO template for strategic operating decisions', () => {
+    const template = EMPLOYEE_TEMPLATES.find((item) => item.key === 'ceo-strategist');
+    const metadata = employeeMetadataFromTemplate('ceo-strategist');
+    const avatarImage = employeeAvatarImage({
+      avatarKind: 'preset',
+      avatarImage: '',
+      avatarPreset: 'executive-compass',
+    });
+    const preset = EMPLOYEE_AVATAR_PRESETS.find((item) => item.key === 'executive-compass');
+    const peerImages = ['commerce-compass', 'sales-handshake'].map((avatarPreset) => employeeAvatarImage({
+      avatarKind: 'preset',
+      avatarImage: '',
+      avatarPreset,
+    }));
+
+    expect(preset).toMatchObject({ label: '首席执行官', text: '总', tone: 'blue' });
+    expect(template).toMatchObject({
+      roleName: '首席执行官',
+      avatarText: '总',
+      avatarTone: 'blue',
+      avatarPreset: 'executive-compass',
+      workStyles: expect.arrayContaining(['全局视角', '数据驱动', '风险透明']),
+      expertiseTags: expect.arrayContaining(['战略规划', '经营复盘', '关键决策']),
+      workModes: expect.arrayContaining(['问答', '战略分析']),
+    });
+    expect(metadata).toMatchObject({
+      role_key: 'ceo-strategist',
+      role_name: '首席执行官',
+      avatar_kind: 'preset',
+      avatar_preset: 'executive-compass',
+    });
+    expect(avatarImage).toContain('staffdeck-avatar-executive.png');
+    expect(peerImages).not.toContain(avatarImage);
+  });
 });

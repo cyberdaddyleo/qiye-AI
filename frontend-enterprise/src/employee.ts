@@ -10,6 +10,7 @@ import avatarAfterSales from './assets/staffdeck/staffdeck-avatar-after-sales.pn
 import avatarCommerce from './assets/staffdeck/staffdeck-avatar-commerce.png';
 import avatarData from './assets/staffdeck/staffdeck-avatar-data.png';
 import avatarDefault from './assets/staffdeck/staffdeck-avatar-default.png';
+import avatarExecutive from './assets/staffdeck/staffdeck-avatar-executive.png';
 import avatarKnowledge from './assets/staffdeck/staffdeck-avatar-knowledge.png';
 import avatarMarketing from './assets/staffdeck/staffdeck-avatar-marketing.png';
 import avatarOps from './assets/staffdeck/staffdeck-avatar-ops.png';
@@ -64,6 +65,7 @@ export const EMPLOYEE_AVATAR_PRESETS: EmployeeAvatarPreset[] = [
   { key: 'service-orbit', label: '研发员工', text: '研', tone: 'teal' },
   { key: 'after-sales-seal', label: '行政员工', text: '行', tone: 'copper' },
   { key: 'knowledge-node', label: '知识运营员工', text: '知', tone: 'olive' },
+  { key: 'executive-compass', label: '首席执行官', text: '总', tone: 'blue' },
   { key: 'commerce-compass', label: '财务员工', text: '财', tone: 'blue' },
   { key: 'ops-grid', label: '人事员工', text: '人', tone: 'ink' },
   { key: 'quality-star', label: '法务员工', text: '法', tone: 'gold' },
@@ -80,6 +82,7 @@ const PRESET_AVATAR_IMAGES: Record<string, string> = {
   'service-orbit': avatarService,
   'after-sales-seal': avatarAfterSales,
   'knowledge-node': avatarKnowledge,
+  'executive-compass': avatarExecutive,
   'commerce-compass': avatarCommerce,
   'ops-grid': avatarOps,
   'quality-star': avatarQuality,
@@ -104,6 +107,17 @@ export function employeeAvatarImage(profile: AvatarSource): string {
 }
 
 export const EMPLOYEE_TEMPLATES: EmployeeTemplate[] = [
+  {
+    key: 'ceo-strategist',
+    roleName: '首席执行官',
+    avatarText: '总',
+    avatarTone: 'blue',
+    avatarPreset: 'executive-compass',
+    description: '负责统筹公司战略规划、经营目标复盘、资源配置与关键决策支持，输出结构化决策简报；涉及高风险事项或对外承诺时明确要求人工确认。',
+    workStyles: ['全局视角', '数据驱动', '风险透明'],
+    expertiseTags: ['战略规划', '经营复盘', '关键决策'],
+    workModes: ['问答', '战略分析'],
+  },
   {
     key: 'service-specialist',
     roleName: '研发',
