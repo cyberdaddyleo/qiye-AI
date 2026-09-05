@@ -1,0 +1,365 @@
+from __future__ import annotations
+
+from datetime import date
+
+from sqlmodel import Session, select
+
+from app.db.models import (
+    Department,
+    EmployeeProfile,
+    User,
+    WorkProject,
+    WorkTask,
+    WorkTaskDependency,
+    WorkTaskEvent,
+)
+
+TENANT_ID = "tenant_demo"
+PROJECT_ID = "project_quantxy_delivery_example"
+
+
+def _user_by_username(session: Session, tenant_id: str, username: str) -> User | None:
+    return session.exec(
+        select(User).where(User.tenant_id == tenant_id, User.username == username)
+    ).first()
+
+
+def _seed_users(session: Session, tenant_id: str) -> dict[str, User]:
+    admin = _user_by_username(session, tenant_id, "admin")
+    demo_user = _user_by_username(session, tenant_id, "user_demo")
+    if admin is None or demo_user is None:
+        raise RuntimeError("QuantXY workbench seed requires the demo admin and user")
+
+    users = {"ceo": admin, "sales": demo_user}
+    for role, user_id, username, display_name in (
+        (
+            "operations",
+            "user_quantxy_operations_example",
+            "operations_example",
+            "运营负责人（示例）",
+        ),
+        (
+            "delivery",
+            "user_quantxy_delivery_example",
+            "delivery_example",
+            "交付负责人（示例）",
+        ),
+        (
+            "technology",
+            "user_quantxy_technology_example",
+            "technology_example",
+            "技术负责人（示例）",
+        ),
+        (
+            "administration",
+            "user_quantxy_administration_example",
+            "administration_example",
+            "行政负责人（示例）",
+        ),
+        (
+            "finance",
+            "user_quantxy_finance_example",
+            "finance_example",
+            "财务负责人（示例）",
+        ),
+    ):
+        user = _user_by_username(session, tenant_id, username)
+        if user is None:
+            user = User(
+                id=user_id,
+                tenant_id=tenant_id,
+                username=username,
+                display_name=display_name,
+                role="member",
+                source="web",
+                password_hash=demo_user.password_hash,
+            )
+            session.add(user)
+        users[role] = user
+    session.flush()
+    return users
+
+
+def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None:
+    has_departments = session.exec(
+        select(Department.id).where(Department.tenant_id == tenant_id).limit(1)
+    ).first()
+    has_employees = session.exec(
+        select(EmployeeProfile.id).where(EmployeeProfile.tenant_id == tenant_id).limit(1)
+    ).first()
+    if has_departments is not None or has_employees is not None:
+        return
+
+    users = _seed_users(session, tenant_id)
+    department_specs = (
+        ("sales", "dept_quantxy_sales", "销售部", "SALES"),
+        ("operations", "dept_quantxy_operations", "运营部", "OPERATIONS"),
+        ("delivery", "dept_quantxy_delivery", "交付部", "DELIVERY"),
+        ("technology", "dept_quantxy_technology", "技术部", "TECHNOLOGY"),
+        (
+            "administration",
+            "dept_quantxy_administration",
+            "行政部",
+            "ADMINISTRATION",
+        ),
+        ("finance", "dept_quantxy_finance", "财务部", "FINANCE"),
+    )
+    departments = {
+        role: Department(
+            id=department_id,
+            tenant_id=tenant_id,
+            name=name,
+            code=code,
+            manager_user_id=users[role].id,
+        )
+        for role, department_id, name, code in department_specs
+    }
+    session.add_all(list(departments.values()))
+
+    employee_specs = (
+        (
+            "employee_quantxy_ceo",
+            "ceo",
+            None,
+            "QXY-CEO-001",
+            "首席执行官（示例）",
+            "ceo",
+            ["战略协同", "资源协调"],
+        ),
+        (
+            "employee_quantxy_sales",
+            "sales",
+            "sales",
+            "QXY-SALES-001",
+            "销售负责人（示例）",
+            "manager",
+            ["客户沟通", "需求澄清"],
+        ),
+        (
+            "employee_quantxy_operations",
+            "operations",
+            "operations",
+            "QXY-OPS-001",
+            "运营负责人（示例）",
+            "manager",
+            ["运营策划", "跨部门协同"],
+        ),
+        (
+            "employee_quantxy_delivery",
+            "delivery",
+            "delivery",
+            "QXY-DELIVERY-001",
+            "交付负责人（示例）",
+            "manager",
+            ["项目交付", "风险管理"],
+        ),
+        (
+            "employee_quantxy_technology",
+            "technology",
+            "technology",
+            "QXY-TECH-001",
+            "技术负责人（示例）",
+            "manager",
+            ["技术方案", "质量保障"],
+        ),
+        (
+            "employee_quantxy_administration",
+            "administration",
+            "administration",
+            "QXY-ADMIN-001",
+            "行政负责人（示例）",
+            "manager",
+            ["行政协调", "会议保障"],
+        ),
+        (
+            "employee_quantxy_finance",
+            "finance",
+            "finance",
+            "QXY-FINANCE-001",
+            "财务负责人（示例）",
+            "manager",
+            ["资料核对", "流程合规"],
+        ),
+    )
+    session.add_all(
+        [
+            EmployeeProfile(
+                id=employee_id,
+                tenant_id=tenant_id,
+                user_id=users[user_role].id,
+                employee_no=employee_no,
+                department_id=(departments[department_role].id if department_role else None),
+                job_title=job_title,
+                business_role=business_role,
+                skills_json=skills,
+                capacity_percent=100,
+                daily_cost=None,
+                manager_user_id=None if user_role == "ceo" else users["ceo"].id,
+            )
+            for (
+                employee_id,
+                user_role,
+                department_role,
+                employee_no,
+                job_title,
+                business_role,
+                skills,
+            ) in employee_specs
+        ]
+    )
+
+    project = WorkProject(
+        id=PROJECT_ID,
+        tenant_id=tenant_id,
+        name="客户交付协同（示例）",
+        objective="完成一次跨部门交付演练，明确责任、依赖与验收标准。",
+        description="用于演示企业工作台协作流程的示例项目。",
+        owner_user_id=users["ceo"].id,
+        department_id=departments["delivery"].id,
+        status="active",
+        health="on_track",
+        start_date=date(2026, 9, 1),
+        due_date=date(2026, 9, 30),
+        budget=None,
+    )
+    session.add(project)
+
+    task_specs = (
+        (
+            "task_quantxy_requirements_example",
+            "梳理交付范围（示例）",
+            "operations",
+            "in_progress",
+            30,
+            date(2026, 9, 8),
+            "形成经相关负责人确认的范围与约束清单。",
+        ),
+        (
+            "task_quantxy_technical_example",
+            "准备技术方案（示例）",
+            "technology",
+            "blocked",
+            0,
+            date(2026, 9, 12),
+            "方案说明关键组件、接口、验证方式与主要风险。",
+        ),
+        (
+            "task_quantxy_delivery_example",
+            "编排交付计划（示例）",
+            "delivery",
+            "blocked",
+            0,
+            date(2026, 9, 16),
+            "交付计划列出阶段、责任人、依赖与验收节点。",
+        ),
+        (
+            "task_quantxy_administration_example",
+            "准备协作保障（示例）",
+            "administration",
+            "backlog",
+            0,
+            date(2026, 9, 10),
+            "会议、沟通与资料归档安排清晰可执行。",
+        ),
+        (
+            "task_quantxy_finance_example",
+            "核对商务资料（示例）",
+            "finance",
+            "blocked",
+            0,
+            date(2026, 9, 15),
+            "商务资料与内部审批节点完整，待确认事项有明确责任人。",
+        ),
+        (
+            "task_quantxy_sales_example",
+            "确认客户沟通清单（示例）",
+            "sales",
+            "blocked",
+            0,
+            date(2026, 9, 18),
+            "沟通清单说明范围、里程碑、责任人与升级路径。",
+        ),
+    )
+    session.add_all(
+        [
+            WorkTask(
+                id=task_id,
+                tenant_id=tenant_id,
+                project_id=project.id,
+                title=title,
+                description="该任务属于 QuantXY 企业工作台演示数据。",
+                required_role=role,
+                priority="normal",
+                status=status,
+                assignee_user_id=users[role].id,
+                reviewer_user_id=users["ceo"].id,
+                start_date=date(2026, 9, 1),
+                due_date=due_date,
+                estimate_days=2.0,
+                progress=progress,
+                acceptance_criteria=acceptance_criteria,
+            )
+            for task_id, title, role, status, progress, due_date, acceptance_criteria in task_specs
+        ]
+    )
+
+    dependency_specs = (
+        (
+            "taskdep_quantxy_technical_requirements_example",
+            "task_quantxy_technical_example",
+            "task_quantxy_requirements_example",
+        ),
+        (
+            "taskdep_quantxy_delivery_requirements_example",
+            "task_quantxy_delivery_example",
+            "task_quantxy_requirements_example",
+        ),
+        (
+            "taskdep_quantxy_delivery_technical_example",
+            "task_quantxy_delivery_example",
+            "task_quantxy_technical_example",
+        ),
+        (
+            "taskdep_quantxy_finance_requirements_example",
+            "task_quantxy_finance_example",
+            "task_quantxy_requirements_example",
+        ),
+        (
+            "taskdep_quantxy_sales_delivery_example",
+            "task_quantxy_sales_example",
+            "task_quantxy_delivery_example",
+        ),
+        (
+            "taskdep_quantxy_sales_administration_example",
+            "task_quantxy_sales_example",
+            "task_quantxy_administration_example",
+        ),
+        (
+            "taskdep_quantxy_sales_finance_example",
+            "task_quantxy_sales_example",
+            "task_quantxy_finance_example",
+        ),
+    )
+    session.add_all(
+        [
+            WorkTaskDependency(
+                id=dependency_id,
+                tenant_id=tenant_id,
+                task_id=task_id,
+                depends_on_task_id=depends_on_task_id,
+            )
+            for dependency_id, task_id, depends_on_task_id in dependency_specs
+        ]
+    )
+    session.add(
+        WorkTaskEvent(
+            id="taskevent_quantxy_requirements_created_example",
+            tenant_id=tenant_id,
+            task_id="task_quantxy_requirements_example",
+            actor_user_id=users["ceo"].id,
+            actor_type="user",
+            event_type="task_created",
+            payload_json={"source": "quantxy_demo_seed", "sample": True},
+        )
+    )
+    session.flush()

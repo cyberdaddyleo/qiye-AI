@@ -20,10 +20,10 @@ from app.db.models import (
     User,
     utc_now,
 )
-from app.security.encryption import encrypt_secret
-from app.security.auth import hash_password
 from app.db.staffdeck_seed import seed_staffdeck_admin_gallery
-
+from app.db.workbench_seed import seed_quantxy_workbench
+from app.security.auth import hash_password
+from app.security.encryption import encrypt_secret
 
 ADAPTIVE_FLOW_RULE = (
     "步骤是可自适应推进的目标，不是固定问答脚本；已由当前用户消息、历史信息或路由意图满足的内容"
@@ -955,6 +955,7 @@ def seed_demo_data(session: Session) -> None:
         admin_user.updated_at = utc_now()
         session.add(admin_user)
 
+    seed_quantxy_workbench(session)
     _ensure_seed_agents(session)
 
     for raw_content in (
