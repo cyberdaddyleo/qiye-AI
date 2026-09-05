@@ -21,7 +21,10 @@ from app.db.models import (
     utc_now,
 )
 from app.db.staffdeck_seed import seed_staffdeck_admin_gallery
-from app.db.workbench_seed import seed_quantxy_workbench
+from app.db.workbench_seed import (
+    acquire_quantxy_seed_transaction_lock,
+    seed_quantxy_workbench,
+)
 from app.security.auth import hash_password
 from app.security.encryption import encrypt_secret
 
@@ -915,6 +918,7 @@ def _seed_mcp_servers(session: Session) -> None:
 
 def seed_demo_data(session: Session) -> None:
     settings = get_settings()
+    acquire_quantxy_seed_transaction_lock(session)
     if not session.get(Tenant, "tenant_demo"):
         session.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
 

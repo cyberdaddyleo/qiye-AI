@@ -503,15 +503,19 @@ def build_plan(db: Session, request: Any, current_user: User) -> WorkPlan:
     budget = request.budget if request.budget is not None else project.budget
     constraints = dict(request.constraints or {})
     generated = generate_wbs(db, tenant_id, goal, constraints)
-    employees = list(
-        db.exec(
-            select(EmployeeProfile).where(
-                EmployeeProfile.tenant_id == tenant_id,
-                EmployeeProfile.status == "active",
-                EmployeeProfile.department_id == project.department_id,
-            )
-        ).all()
+    employee_statement = select(EmployeeProfile).where(
+        EmployeeProfile.tenant_id == tenant_id,
+        EmployeeProfile.status == "active",
     )
+    if access.business_role == "manager":
+        employee_statement = employee_statement.where(
+            EmployeeProfile.department_id.in_(access.managed_department_ids)
+        )
+    elif not access.can_view_all:
+        employee_statement = employee_statement.where(
+            EmployeeProfile.department_id == project.department_id
+        )
+    employees = list(db.exec(employee_statement).all())
     current_work = list(
         db.exec(
             select(WorkTask).where(

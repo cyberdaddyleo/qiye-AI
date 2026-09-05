@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from datetime import date
+from threading import Lock
 
+from sqlalchemy import event
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import SessionTransaction
 from sqlmodel import Session, select
 
 from app.db.models import (
@@ -16,6 +20,34 @@ from app.db.models import (
 
 TENANT_ID = "tenant_demo"
 PROJECT_ID = "project_quantxy_delivery_example"
+_SEED_LOCK = Lock()
+_SESSION_LOCK_KEY = "quantxy_workbench_seed_lock"
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _release_seed_lock(session: Session, transaction: SessionTransaction) -> None:
+    if transaction.parent is not None:
+        return
+    if session.info.pop(_SESSION_LOCK_KEY, False):
+        _SEED_LOCK.release()
+
+
+def acquire_quantxy_seed_transaction_lock(session: Session) -> None:
+    """Serialize demo seed writes until the caller's transaction ends."""
+    if session.info.get(_SESSION_LOCK_KEY):
+        return
+    _SEED_LOCK.acquire()
+    session.info[_SESSION_LOCK_KEY] = True
+
+
+def _has_workbench_organization(session: Session, tenant_id: str) -> bool:
+    has_departments = session.exec(
+        select(Department.id).where(Department.tenant_id == tenant_id).limit(1)
+    ).first()
+    has_employees = session.exec(
+        select(EmployeeProfile.id).where(EmployeeProfile.tenant_id == tenant_id).limit(1)
+    ).first()
+    return has_departments is not None or has_employees is not None
 
 
 def _user_by_username(session: Session, tenant_id: str, username: str) -> User | None:
@@ -81,13 +113,24 @@ def _seed_users(session: Session, tenant_id: str) -> dict[str, User]:
 
 
 def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None:
-    has_departments = session.exec(
-        select(Department.id).where(Department.tenant_id == tenant_id).limit(1)
-    ).first()
-    has_employees = session.exec(
-        select(EmployeeProfile.id).where(EmployeeProfile.tenant_id == tenant_id).limit(1)
-    ).first()
-    if has_departments is not None or has_employees is not None:
+    if tenant_id != TENANT_ID:
+        raise ValueError("QuantXY workbench seed only supports tenant_demo")
+
+    acquire_quantxy_seed_transaction_lock(session)
+    # Keep caller-owned pending writes outside the seed savepoint and its conflict recovery.
+    session.flush()
+    try:
+        with session.begin_nested():
+            _seed_quantxy_workbench_once(session, tenant_id)
+    except IntegrityError:
+        session.expire_all()
+        if _has_workbench_organization(session, tenant_id):
+            return
+        raise
+
+
+def _seed_quantxy_workbench_once(session: Session, tenant_id: str) -> None:
+    if _has_workbench_organization(session, tenant_id):
         return
 
     users = _seed_users(session, tenant_id)
@@ -140,27 +183,27 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
             "operations",
             "operations",
             "QXY-OPS-001",
-            "运营负责人（示例）",
+            "运营负责人（示例） Business Analyst",
             "manager",
-            ["运营策划", "跨部门协同"],
+            ["运营策划", "跨部门协同", "research", "analysis"],
         ),
         (
             "employee_quantxy_delivery",
             "delivery",
             "delivery",
             "QXY-DELIVERY-001",
-            "交付负责人（示例）",
+            "交付负责人（示例） Delivery Manager",
             "manager",
-            ["项目交付", "风险管理"],
+            ["项目交付", "风险管理", "planning"],
         ),
         (
             "employee_quantxy_technology",
             "technology",
             "technology",
             "QXY-TECH-001",
-            "技术负责人（示例）",
+            "技术负责人（示例） Backend Engineer QA Engineer",
             "manager",
-            ["技术方案", "质量保障"],
+            ["技术方案", "质量保障", "python", "fastapi", "testing"],
         ),
         (
             "employee_quantxy_administration",
@@ -229,8 +272,9 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
             "task_quantxy_requirements_example",
             "梳理交付范围（示例）",
             "operations",
-            "in_progress",
-            30,
+            "backlog",
+            0,
+            date(2026, 9, 1),
             date(2026, 9, 8),
             "形成经相关负责人确认的范围与约束清单。",
         ),
@@ -240,6 +284,7 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
             "technology",
             "blocked",
             0,
+            date(2026, 9, 9),
             date(2026, 9, 12),
             "方案说明关键组件、接口、验证方式与主要风险。",
         ),
@@ -249,6 +294,7 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
             "delivery",
             "blocked",
             0,
+            date(2026, 9, 14),
             date(2026, 9, 16),
             "交付计划列出阶段、责任人、依赖与验收节点。",
         ),
@@ -258,6 +304,7 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
             "administration",
             "backlog",
             0,
+            date(2026, 9, 1),
             date(2026, 9, 10),
             "会议、沟通与资料归档安排清晰可执行。",
         ),
@@ -267,6 +314,7 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
             "finance",
             "blocked",
             0,
+            date(2026, 9, 9),
             date(2026, 9, 15),
             "商务资料与内部审批节点完整，待确认事项有明确责任人。",
         ),
@@ -276,32 +324,41 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
             "sales",
             "blocked",
             0,
+            date(2026, 9, 17),
             date(2026, 9, 18),
             "沟通清单说明范围、里程碑、责任人与升级路径。",
         ),
     )
-    session.add_all(
-        [
-            WorkTask(
-                id=task_id,
-                tenant_id=tenant_id,
-                project_id=project.id,
-                title=title,
-                description="该任务属于 QuantXY 企业工作台演示数据。",
-                required_role=role,
-                priority="normal",
-                status=status,
-                assignee_user_id=users[role].id,
-                reviewer_user_id=users["ceo"].id,
-                start_date=date(2026, 9, 1),
-                due_date=due_date,
-                estimate_days=2.0,
-                progress=progress,
-                acceptance_criteria=acceptance_criteria,
-            )
-            for task_id, title, role, status, progress, due_date, acceptance_criteria in task_specs
-        ]
-    )
+    tasks = [
+        WorkTask(
+            id=task_id,
+            tenant_id=tenant_id,
+            project_id=project.id,
+            title=title,
+            description="该任务属于 QuantXY 企业工作台演示数据。",
+            required_role=role,
+            priority="normal",
+            status=status,
+            assignee_user_id=users[role].id,
+            reviewer_user_id=users["ceo"].id,
+            start_date=start_date,
+            due_date=due_date,
+            estimate_days=2.0,
+            progress=progress,
+            acceptance_criteria=acceptance_criteria,
+        )
+        for (
+            task_id,
+            title,
+            role,
+            status,
+            progress,
+            start_date,
+            due_date,
+            acceptance_criteria,
+        ) in task_specs
+    ]
+    session.add_all(tasks)
 
     dependency_specs = (
         (
@@ -351,15 +408,32 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
             for dependency_id, task_id, depends_on_task_id in dependency_specs
         ]
     )
-    session.add(
-        WorkTaskEvent(
-            id="taskevent_quantxy_requirements_created_example",
-            tenant_id=tenant_id,
-            task_id="task_quantxy_requirements_example",
-            actor_user_id=users["ceo"].id,
-            actor_type="user",
-            event_type="task_created",
-            payload_json={"source": "quantxy_demo_seed", "sample": True},
+    for task in tasks:
+        task_slug = task.id.removeprefix("task_quantxy_").removesuffix("_example")
+        session.add_all(
+            [
+                WorkTaskEvent(
+                    id=f"taskevent_quantxy_{task_slug}_created_example",
+                    tenant_id=tenant_id,
+                    task_id=task.id,
+                    actor_user_id=users["ceo"].id,
+                    actor_type="user",
+                    event_type="task_created",
+                    payload_json={"old_status": None, "new_status": task.status},
+                ),
+                WorkTaskEvent(
+                    id=f"taskevent_quantxy_{task_slug}_assigned_example",
+                    tenant_id=tenant_id,
+                    task_id=task.id,
+                    actor_user_id=users["ceo"].id,
+                    actor_type="user",
+                    event_type="task_assigned",
+                    payload_json={
+                        "old_status": task.status,
+                        "new_status": task.status,
+                        "assignee_user_id": task.assignee_user_id,
+                    },
+                ),
+            ]
         )
-    )
     session.flush()

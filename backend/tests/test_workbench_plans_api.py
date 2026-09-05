@@ -529,6 +529,100 @@ def test_member_project_owner_can_preview_and_dispatch(
     assert response.json()
 
 
+def test_manager_owner_plan_candidates_stay_inside_exact_managed_departments(
+    workbench: tuple[TestClient, object, dict[str, User], WorkProject]
+) -> None:
+    client, engine, users, project = workbench
+    with Session(engine) as db:
+        project_department = db.get(Department, project.department_id)
+        project_department.manager_user_id = users["analyst"].id
+        db.add(project_department)
+        managed_department = Department(
+            tenant_id="tenant_a",
+            name="Manager scope",
+            code="MANAGER_SCOPE",
+            manager_user_id=users["manager"].id,
+        )
+        managed_worker = User(
+            tenant_id="tenant_a",
+            username="managed-worker-plan",
+            password_hash="hash",
+        )
+        db.add_all([managed_department, managed_worker])
+        db.flush()
+        db.add(
+            EmployeeProfile(
+                tenant_id="tenant_a",
+                user_id=managed_worker.id,
+                department_id=managed_department.id,
+                job_title="Backend Engineer",
+                business_role="member",
+                skills_json=["python", "fastapi"],
+            )
+        )
+        db.commit()
+        managed_worker_id = managed_worker.id
+
+    preview = _preview(client, users["manager"], project)
+
+    selected = next(variant for variant in preview["variants"] if variant["key"] == "A")
+    assert {
+        candidate_id
+        for task in selected["tasks"]
+        for candidate_id in task["assignment"]["candidate_scores"]
+    } == {managed_worker_id}
+    assert {
+        task["assignee_user_id"] for task in selected["tasks"] if task["assignee_user_id"]
+    } <= {managed_worker_id}
+
+
+def test_member_owner_plan_candidates_stay_inside_the_project_department(
+    workbench: tuple[TestClient, object, dict[str, User], WorkProject]
+) -> None:
+    client, engine, users, project = workbench
+    with Session(engine) as db:
+        stored_project = db.get(WorkProject, project.id)
+        stored_project.owner_user_id = users["member"].id
+        outside_department = Department(
+            tenant_id="tenant_a",
+            name="Outside owner scope",
+            code="OUTSIDE_OWNER_SCOPE",
+            manager_user_id=users["analyst"].id,
+        )
+        outside_worker = User(
+            tenant_id="tenant_a",
+            username="outside-owner-scope-plan",
+            password_hash="hash",
+        )
+        db.add_all([stored_project, outside_department, outside_worker])
+        db.flush()
+        db.add(
+            EmployeeProfile(
+                tenant_id="tenant_a",
+                user_id=outside_worker.id,
+                department_id=outside_department.id,
+                job_title="Business Analyst Backend Engineer QA Engineer Delivery Manager",
+                business_role="member",
+                skills_json=["research", "analysis", "python", "fastapi", "testing", "planning"],
+            )
+        )
+        db.commit()
+
+    preview = _preview(client, users["member"], project)
+
+    selected = next(variant for variant in preview["variants"] if variant["key"] == "A")
+    assert {
+        candidate_id
+        for task in selected["tasks"]
+        for candidate_id in task["assignment"]["candidate_scores"]
+    } == {
+        users["manager"].id,
+        users["member"].id,
+        users["engineer"].id,
+        users["analyst"].id,
+    }
+
+
 def test_dispatch_rolls_back_all_side_effects_on_mid_transaction_failure(
     workbench: tuple[TestClient, object, dict[str, User], WorkProject],
     monkeypatch: pytest.MonkeyPatch,
