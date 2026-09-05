@@ -55,6 +55,11 @@ type ProjectForm = {
   budget: string;
 };
 
+type ProjectLoadFailure = {
+  source: 'projects' | 'departments' | 'employees';
+  reason: unknown;
+};
+
 const EMPTY_FORM: ProjectForm = {
   name: '',
   objective: '',
@@ -70,7 +75,7 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
   const [departments, setDepartments] = useState<DepartmentRead[]>([]);
   const [employees, setEmployees] = useState<EmployeeRead[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<unknown>(null);
+  const [loadFailure, setLoadFailure] = useState<ProjectLoadFailure | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<ProjectForm>(EMPTY_FORM);
@@ -80,28 +85,34 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setError(null);
+    setLoadFailure(null);
     void Promise.allSettled([
       workbenchApi.listProjects(currentUser.tenant_id),
       workbenchApi.listDepartments(currentUser.tenant_id),
       workbenchApi.listEmployees(currentUser.tenant_id),
     ]).then(([projectResult, departmentResult, employeeResult]) => {
       if (!active) return;
+      setProjects(
+        projectResult.status === 'fulfilled' && Array.isArray(projectResult.value)
+          ? projectResult.value
+          : [],
+      );
+      setDepartments(
+        departmentResult.status === 'fulfilled' && Array.isArray(departmentResult.value)
+          ? departmentResult.value
+          : [],
+      );
+      setEmployees(
+        employeeResult.status === 'fulfilled' && Array.isArray(employeeResult.value)
+          ? employeeResult.value
+          : [],
+      );
       if (projectResult.status === 'rejected') {
-        setError(projectResult.reason);
-        setProjects([]);
-      } else {
-        setProjects(Array.isArray(projectResult.value) ? projectResult.value : []);
-        setDepartments(
-          departmentResult.status === 'fulfilled' && Array.isArray(departmentResult.value)
-            ? departmentResult.value.filter((department) => department.status === 'active')
-            : [],
-        );
-        setEmployees(
-          employeeResult.status === 'fulfilled' && Array.isArray(employeeResult.value)
-            ? employeeResult.value
-            : [],
-        );
+        setLoadFailure({ source: 'projects', reason: projectResult.reason });
+      } else if (departmentResult.status === 'rejected') {
+        setLoadFailure({ source: 'departments', reason: departmentResult.reason });
+      } else if (employeeResult.status === 'rejected') {
+        setLoadFailure({ source: 'employees', reason: employeeResult.reason });
       }
       setLoading(false);
     });
@@ -114,13 +125,17 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
   const canCreate = currentUser.role === 'admin'
     || self?.business_role === 'ceo'
     || self?.business_role === 'manager';
+  const activeDepartments = useMemo(
+    () => departments.filter((department) => department.status === 'active'),
+    [departments],
+  );
   const departmentById = useMemo(
     () => new Map(departments.map((department) => [department.id, department])),
     [departments],
   );
 
   function openCreateDialog() {
-    setForm({ ...EMPTY_FORM, departmentId: departments[0]?.id || '' });
+    setForm({ ...EMPTY_FORM, departmentId: activeDepartments[0]?.id || '' });
     setSaveError('');
     setDialogOpen(true);
   }
@@ -165,7 +180,7 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
       description="创建项目并跟踪目标、进度与健康状态"
       currentUser={currentUser}
       onLogout={onLogout}
-      actions={canCreate ? (
+      actions={!loading && !loadFailure && canCreate ? (
         <Button type="button" onClick={openCreateDialog} className="h-[34px] gap-[6px] rounded-[10px] bg-[#18181a] px-[14px] text-[12px] text-white hover:bg-[#303030]">
           <Plus className="size-[14px]" aria-hidden="true" />
           新建项目
@@ -178,9 +193,9 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
             <Skeleton key={index} className="h-[250px] rounded-[16px] bg-[#e9edf4]" />
           ))}
         </div>
-      ) : error ? (
+      ) : loadFailure ? (
         <ProjectError
-          permissionDenied={error instanceof ApiError && error.status === 403}
+          failure={loadFailure}
           onRetry={() => setRefreshKey((value) => value + 1)}
         />
       ) : projects.length === 0 ? (
@@ -230,7 +245,7 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
               <FormField label="所属部门">
                 <select value={form.departmentId} onChange={(event) => setForm((value) => ({ ...value, departmentId: event.target.value }))} className="h-[36px] w-full rounded-[10px] border border-[#e3e7f1] bg-white px-[10px] text-[13px] text-[#464c5e] outline-none focus:border-[#18181a]">
                   <option value="">请选择部门</option>
-                  {departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
+                  {activeDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
                 </select>
               </FormField>
               <FormField label="预算">
@@ -255,15 +270,46 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
   );
 }
 
-function ProjectError({ permissionDenied, onRetry }: { permissionDenied: boolean; onRetry: () => void }) {
+function ProjectError({ failure, onRetry }: { failure: ProjectLoadFailure; onRetry: () => void }) {
+  const permissionDenied = failure.reason instanceof ApiError && failure.reason.status === 403;
+  const presentation = {
+    projects: permissionDenied
+      ? {
+          title: '无权查看项目中心',
+          detail: '当前账号没有项目中心的访问权限。',
+        }
+      : {
+          title: '项目加载失败',
+          detail: '未能读取项目，请检查网络后重试。',
+        },
+    departments: permissionDenied
+      ? {
+          title: '无权读取项目部门信息',
+          detail: '当前账号无法读取项目所属部门，请联系管理员或重试。',
+        }
+      : {
+          title: '项目部门信息加载失败',
+          detail: '未能读取项目所属部门，为避免展示错误信息，请重试。',
+        },
+    employees: permissionDenied
+      ? {
+          title: '无权读取项目身份信息',
+          detail: '当前账号无法读取项目身份与创建权限，请联系管理员或重试。',
+        }
+      : {
+          title: '项目身份信息加载失败',
+          detail: '未能读取员工身份与创建权限，为避免误判权限，请重试。',
+        },
+  }[failure.source];
+
   return (
     <section role="alert" className="rounded-[16px] border border-[#f1d4d4] bg-white px-[24px] py-[36px] text-center">
       <CircleAlert className="mx-auto size-[28px] text-[#d20b0b]" aria-hidden="true" />
       <h2 className="mt-[12px] mb-0 text-[16px] font-semibold text-[#24262d]">
-        {permissionDenied ? '无权查看项目中心' : '项目加载失败'}
+        {presentation.title}
       </h2>
       <p className="mt-[6px] mb-0 text-[12px] text-[#757f9c]">
-        {permissionDenied ? '当前账号没有项目中心的访问权限。' : '未能读取项目，请检查网络后重试。'}
+        {presentation.detail}
       </p>
       <Button type="button" onClick={onRetry} className="mt-[16px] h-[34px] rounded-[10px] bg-[#18181a] px-[18px] text-[12px] text-white hover:bg-[#303030]">重试</Button>
     </section>

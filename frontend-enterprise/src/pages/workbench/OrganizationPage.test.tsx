@@ -217,6 +217,44 @@ describe('OrganizationPage', () => {
     expect(workbenchApi.importEmployees).toHaveBeenCalledWith(file, 'tenant-demo');
   });
 
+  it('refreshes created and updated employees after a successful import report closes', async () => {
+    const refreshedEmployee: EmployeeRead = {
+      ...employee,
+      job_title: '导入更新岗位',
+    };
+    const importedEmployee: EmployeeRead = {
+      ...employee,
+      id: 'employee-new',
+      user_id: 'user-new',
+      username: 'new.user',
+      display_name: '新增员工',
+      employee_no: 'E009',
+      job_title: '运营专员',
+    };
+    vi.mocked(workbenchApi.listEmployees)
+      .mockResolvedValueOnce([employee])
+      .mockResolvedValueOnce([refreshedEmployee, importedEmployee]);
+    const user = userEvent.setup();
+
+    renderOrganization();
+    await screen.findByText('林珊');
+    await user.click(screen.getByRole('button', { name: '导入员工' }));
+    const dialog = await screen.findByRole('dialog', { name: '导入员工' });
+    await user.upload(
+      within(dialog).getByLabelText('选择 CSV 或 XLSX 文件'),
+      new File(['username,display_name\nnew.user,新增员工'], 'employees.csv', {
+        type: 'text/csv',
+      }),
+    );
+    await user.click(within(dialog).getByRole('button', { name: '开始导入' }));
+    expect(await within(dialog).findByText('新增 1 人')).toBeTruthy();
+    await user.click(within(dialog).getByRole('button', { name: '关闭' }));
+
+    expect(await screen.findByText('新增员工')).toBeTruthy();
+    expect(screen.getByText('导入更新岗位')).toBeTruthy();
+    expect(workbenchApi.listEmployees).toHaveBeenCalledTimes(2);
+  });
+
   it('shows a member returned organization data without mutation controls', async () => {
     renderOrganization({
       id: 'user-lin',

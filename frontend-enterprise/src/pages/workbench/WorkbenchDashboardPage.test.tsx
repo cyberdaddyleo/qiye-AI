@@ -86,6 +86,16 @@ const inactiveEmployee: EmployeeRead = {
   status: 'inactive',
 };
 
+const managerEmployee: EmployeeRead = {
+  ...productEmployee,
+  id: 'employee-manager',
+  user_id: 'user-manager',
+  username: 'manager',
+  display_name: '部门经理',
+  employee_no: 'E003',
+  business_role: 'manager',
+};
+
 const project: ProjectRead = {
   id: 'project-launch',
   tenant_id: 'tenant-demo',
@@ -242,9 +252,58 @@ describe('WorkbenchDashboardPage', () => {
 
     expect(await screen.findByRole('heading', { level: 2, name: '我的工作概览' })).toBeTruthy();
     expect(screen.getByText('我的进行中').parentElement?.textContent).toContain('2');
-    expect(screen.getByText('待提交').parentElement?.textContent).toContain('1');
+    expect(screen.getByText('待审核').parentElement?.textContent).toContain('1');
+    expect(screen.queryByText('待提交')).toBeNull();
     expect(screen.queryByText('团队日成本')).toBeNull();
     expect(screen.queryByText('公司项目')).toBeNull();
+  });
+
+  it.each([
+    {
+      label: 'administrator',
+      user: { ...currentUser, id: 'user-admin', username: 'admin', role: 'admin' as const },
+      employees: [baseEmployee, productEmployee],
+      recoveredHeading: '公司运营概览',
+    },
+    {
+      label: 'CEO',
+      user: currentUser,
+      employees: [baseEmployee, productEmployee],
+      recoveredHeading: '公司运营概览',
+    },
+    {
+      label: 'manager',
+      user: {
+        ...currentUser,
+        id: managerEmployee.user_id,
+        username: managerEmployee.username,
+        display_name: managerEmployee.display_name || managerEmployee.username,
+      },
+      employees: [managerEmployee, productEmployee],
+      recoveredHeading: '部门运营概览',
+    },
+  ])('shows a retryable partial-data error when $label employee data fails', async ({
+    user: authUser,
+    employees: recoveredEmployees,
+    recoveredHeading,
+  }) => {
+    vi.mocked(workbenchApi.listEmployees)
+      .mockRejectedValueOnce(new Error('employee directory unavailable'))
+      .mockResolvedValueOnce(recoveredEmployees);
+    const user = userEvent.setup();
+
+    renderDashboard(authUser);
+
+    expect(await screen.findByRole('alert')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('工作台部分数据加载失败'),
+    );
+    expect(screen.queryByText('团队日成本')).toBeNull();
+    expect(screen.queryByRole('heading', { name: '我的工作概览' })).toBeNull();
+    expect(screen.queryByText('聚焦由你负责的真实工作与协作动态')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '重试' }));
+    expect(await screen.findByRole('heading', { name: recoveredHeading })).toBeTruthy();
   });
 
   it('renders useful empty states when persisted aggregates contain no work', async () => {

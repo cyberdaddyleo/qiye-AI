@@ -299,6 +299,12 @@ export default function OrganizationPage({
     setImportError('');
     try {
       const result = await workbenchApi.importEmployees(importFile, currentUser.tenant_id);
+      try {
+        const employeeRows = await workbenchApi.listEmployees(currentUser.tenant_id);
+        setEmployees(Array.isArray(employeeRows) ? employeeRows : []);
+      } catch {
+        setImportError('导入已完成，但员工列表刷新失败，请关闭导入结果后重试页面。');
+      }
       setImportResult(result);
       notify.success(`员工导入完成：新增 ${result.created}，更新 ${result.updated}`);
     } catch (caught) {

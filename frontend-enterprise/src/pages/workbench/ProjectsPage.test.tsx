@@ -47,6 +47,14 @@ const department: DepartmentRead = {
   updated_at: '2026-09-04T08:00:00Z',
 };
 
+const archivedDepartment: DepartmentRead = {
+  ...department,
+  id: 'department-legacy',
+  name: '历史事业部',
+  code: 'LEGACY',
+  status: 'archived',
+};
+
 const employee: EmployeeRead = {
   id: 'employee-admin',
   tenant_id: 'tenant-demo',
@@ -67,6 +75,24 @@ const employee: EmployeeRead = {
   status: 'active',
   created_at: '2026-09-01T08:00:00Z',
   updated_at: '2026-09-04T08:00:00Z',
+};
+
+const ceoEmployee: EmployeeRead = {
+  ...employee,
+  id: 'employee-ceo',
+  user_id: 'user-ceo',
+  username: 'ceo',
+  display_name: '陈总',
+  business_role: 'ceo',
+};
+
+const managerEmployee: EmployeeRead = {
+  ...employee,
+  id: 'employee-manager',
+  user_id: 'user-manager',
+  username: 'manager',
+  display_name: '部门经理',
+  business_role: 'manager',
 };
 
 const project: ProjectRead = {
@@ -133,6 +159,33 @@ describe('ProjectsPage', () => {
       .toBe('/enterprise/planning?project_id=project-launch');
   });
 
+  it('keeps archived department names for existing projects but excludes them from creation', async () => {
+    const user = userEvent.setup();
+    vi.mocked(workbenchApi.listProjects).mockResolvedValue([
+      {
+        ...project,
+        id: 'project-legacy',
+        name: '历史项目',
+        department_id: archivedDepartment.id,
+      },
+    ]);
+    vi.mocked(workbenchApi.listDepartments).mockResolvedValue([
+      department,
+      archivedDepartment,
+    ]);
+
+    renderProjects();
+
+    const card = await screen.findByRole('article', { name: '历史项目' });
+    expect(within(card).getByText('历史事业部')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '新建项目' }));
+    const departmentSelect = within(
+      await screen.findByRole('dialog', { name: '新建项目' }),
+    ).getByLabelText('所属部门');
+    expect(within(departmentSelect).getByRole('option', { name: '产品部' })).toBeTruthy();
+    expect(within(departmentSelect).queryByRole('option', { name: '历史事业部' })).toBeNull();
+  });
+
   it('lets an administrator create a real project', async () => {
     const user = userEvent.setup();
     renderProjects();
@@ -159,6 +212,71 @@ describe('ProjectsPage', () => {
     });
   });
 
+  it.each([
+    {
+      label: 'administrator employee directory',
+      dependency: 'employees' as const,
+      user: admin,
+      recoveredEmployees: [employee],
+      errorTitle: '项目身份信息加载失败',
+    },
+    {
+      label: 'CEO department directory',
+      dependency: 'departments' as const,
+      user: {
+        ...admin,
+        id: ceoEmployee.user_id,
+        username: ceoEmployee.username,
+        display_name: ceoEmployee.display_name || ceoEmployee.username,
+        role: 'member' as const,
+      },
+      recoveredEmployees: [ceoEmployee],
+      errorTitle: '项目部门信息加载失败',
+    },
+    {
+      label: 'manager employee directory',
+      dependency: 'employees' as const,
+      user: {
+        ...admin,
+        id: managerEmployee.user_id,
+        username: managerEmployee.username,
+        display_name: managerEmployee.display_name || managerEmployee.username,
+        role: 'member' as const,
+      },
+      recoveredEmployees: [managerEmployee],
+      errorTitle: '项目身份信息加载失败',
+    },
+  ])('shows a retryable error without mutations when $label fails', async ({
+    dependency,
+    user: authUser,
+    recoveredEmployees,
+    errorTitle,
+  }) => {
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValue(recoveredEmployees);
+    if (dependency === 'departments') {
+      vi.mocked(workbenchApi.listDepartments).mockRejectedValueOnce(
+        new Error('department directory unavailable'),
+      );
+    } else {
+      vi.mocked(workbenchApi.listEmployees).mockRejectedValueOnce(
+        new Error('employee directory unavailable'),
+      );
+    }
+    const user = userEvent.setup();
+
+    renderProjects(authUser);
+
+    expect(await screen.findByRole('alert')).toHaveProperty(
+      'textContent',
+      expect.stringContaining(errorTitle),
+    );
+    expect(screen.queryByRole('button', { name: '新建项目' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '重试' }));
+    expect(await screen.findByText('产品发布')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '新建项目' })).toBeTruthy();
+  });
+
   it('shows empty, retryable error, and permission-denied states without mutation controls', async () => {
     vi.mocked(workbenchApi.listProjects).mockResolvedValueOnce([]);
     const view = renderProjects();
@@ -171,6 +289,7 @@ describe('ProjectsPage', () => {
     const user = userEvent.setup();
     renderProjects();
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('项目加载失败'));
+    expect(screen.queryByRole('button', { name: '新建项目' })).toBeNull();
     await user.click(screen.getByRole('button', { name: '重试' }));
     expect(await screen.findByText('产品发布')).toBeTruthy();
     cleanup();
@@ -178,7 +297,7 @@ describe('ProjectsPage', () => {
     vi.mocked(workbenchApi.listProjects).mockRejectedValueOnce(
       new ApiError(403, '{"detail":"Forbidden"}', 'Forbidden'),
     );
-    renderProjects({ ...admin, role: 'member' });
+    renderProjects();
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('无权查看项目中心'));
     expect(screen.queryByRole('button', { name: '新建项目' })).toBeNull();
   });

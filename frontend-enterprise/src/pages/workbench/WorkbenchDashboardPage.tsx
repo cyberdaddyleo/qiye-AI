@@ -109,15 +109,27 @@ function DashboardLoading() {
   );
 }
 
-function DashboardError({ permissionDenied, onRetry }: { permissionDenied: boolean; onRetry: () => void }) {
+function DashboardError({
+  permissionDenied,
+  partial = false,
+  onRetry,
+}: {
+  permissionDenied: boolean;
+  partial?: boolean;
+  onRetry: () => void;
+}) {
   return (
     <section role="alert" className="rounded-[16px] border border-[#f1d4d4] bg-white px-[24px] py-[32px] text-center">
       <CircleAlert className="mx-auto size-[28px] text-[#d20b0b]" aria-hidden="true" />
       <h2 className="mt-[12px] text-[16px] font-semibold text-[#24262d]">
-        {permissionDenied ? '无权查看工作台' : '工作台加载失败'}
+        {partial ? '工作台部分数据加载失败' : permissionDenied ? '无权查看工作台' : '工作台加载失败'}
       </h2>
       <p className="mt-[6px] text-[12px] leading-[20px] text-[#757f9c]">
-        {permissionDenied ? '当前账号没有此工作台的访问权限。' : '未能读取最新运营数据，请稍后重试。'}
+        {partial
+          ? '员工身份与成本数据不可用，为避免展示错误范围或金额，请重试。'
+          : permissionDenied
+            ? '当前账号没有此工作台的访问权限。'
+            : '未能读取最新运营数据，请稍后重试。'}
       </p>
       <Button type="button" onClick={onRetry} className="mt-[16px] h-[34px] rounded-[10px] bg-[#18181a] px-[18px] text-[12px] text-white hover:bg-[#303030]">
         重试
@@ -151,12 +163,14 @@ export default function WorkbenchDashboardPage({
   const [employees, setEmployees] = useState<EmployeeRead[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
+  const [employeeError, setEmployeeError] = useState<unknown>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError(null);
+    setEmployeeError(null);
     const dashboardRequest = workbenchApi.getDashboard(currentUser.tenant_id);
     const employeeRequest = workbenchApi.listEmployees(currentUser.tenant_id);
     void Promise.allSettled([dashboardRequest, employeeRequest]).then(([dashboardResult, employeeResult]) => {
@@ -166,18 +180,22 @@ export default function WorkbenchDashboardPage({
         setDashboard(null);
       } else {
         setDashboard(normalizeDashboard(dashboardResult.value));
-        setEmployees(
-          employeeResult.status === 'fulfilled' && Array.isArray(employeeResult.value)
-            ? employeeResult.value
-            : [],
-        );
+        if (employeeResult.status === 'fulfilled') {
+          setEmployees(Array.isArray(employeeResult.value) ? employeeResult.value : []);
+        } else {
+          setEmployees([]);
+          const expectedMemberDenial = currentUser.role === 'member'
+            && employeeResult.reason instanceof ApiError
+            && employeeResult.reason.status === 403;
+          if (!expectedMemberDenial) setEmployeeError(employeeResult.reason);
+        }
       }
       setLoading(false);
     });
     return () => {
       active = false;
     };
-  }, [currentUser.tenant_id, refreshKey]);
+  }, [currentUser.role, currentUser.tenant_id, refreshKey]);
 
   const employeeByUserId = useMemo(
     () => new Map(employees.map((employee) => [employee.user_id, employee])),
@@ -200,7 +218,11 @@ export default function WorkbenchDashboardPage({
   return (
     <WorkbenchLayout
       title="企业工作台"
-      description={isGlobalView ? '查看公司项目、任务、人员负载与协作动态' : '聚焦由你负责的真实工作与协作动态'}
+      description={employeeError
+        ? '员工与成本数据未完成加载'
+        : isGlobalView
+          ? '查看公司项目、任务、人员负载与协作动态'
+          : '聚焦由你负责的真实工作与协作动态'}
       currentUser={currentUser}
       onLogout={onLogout}
     >
@@ -209,6 +231,12 @@ export default function WorkbenchDashboardPage({
       ) : error ? (
         <DashboardError
           permissionDenied={error instanceof ApiError && error.status === 403}
+          onRetry={() => setRefreshKey((value) => value + 1)}
+        />
+      ) : employeeError ? (
+        <DashboardError
+          permissionDenied={false}
+          partial
           onRetry={() => setRefreshKey((value) => value + 1)}
         />
       ) : (
@@ -240,7 +268,7 @@ export default function WorkbenchDashboardPage({
             ) : (
               <>
                 <WorkbenchKpi label="我的进行中" value={data.task_counts.in_progress || 0} supporting="正在推进" icon={<Clock3 className="size-[18px]" />} />
-                <WorkbenchKpi label="待提交" value={data.task_counts.review || 0} supporting="已提交、等待审核" icon={<ClipboardCheck className="size-[18px]" />} tone="orange" />
+                <WorkbenchKpi label="待审核" value={data.task_counts.review || 0} supporting="已提交、等待审核" icon={<ClipboardCheck className="size-[18px]" />} tone="orange" />
                 <WorkbenchKpi label="逾期任务" value={data.at_risk_tasks.length} supporting="需要优先处理" icon={<CircleAlert className="size-[18px]" />} tone="red" />
                 <WorkbenchKpi label="我的待办" value={data.task_counts.backlog || 0} supporting="可以开始执行" icon={<ListTodo className="size-[18px]" />} tone="gray" />
               </>
