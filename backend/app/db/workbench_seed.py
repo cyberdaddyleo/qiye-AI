@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from threading import Lock
+from typing import BinaryIO
 
 from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
@@ -24,20 +28,112 @@ _SEED_LOCK = Lock()
 _SESSION_LOCK_KEY = "quantxy_workbench_seed_lock"
 
 
+@dataclass(frozen=True)
+class _SeedLockState:
+    file_handle: BinaryIO | None
+
+
+def _sqlite_seed_lock_path(session: Session) -> Path | None:
+    bind = session.get_bind()
+    if bind.dialect.name != "sqlite":
+        return None
+    database = bind.url.database
+    if not database or database == ":memory:":
+        return None
+    database_path = Path(database).expanduser()
+    if not database_path.is_absolute():
+        database_path = database_path.resolve()
+    return database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
+
+
+def _lock_file(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        if handle.read(1) == b"":
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _close_file_lock(handle: BinaryIO) -> None:
+    try:
+        _unlock_file(handle)
+    except OSError:
+        # Closing the descriptor also releases an advisory lock.
+        pass
+    finally:
+        handle.close()
+
+
+def _open_file_lock(lock_path: Path) -> BinaryIO:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        _lock_file(handle)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
 @event.listens_for(Session, "after_transaction_end")
 def _release_seed_lock(session: Session, transaction: SessionTransaction) -> None:
     if transaction.parent is not None:
         return
-    if session.info.pop(_SESSION_LOCK_KEY, False):
+    state = session.info.pop(_SESSION_LOCK_KEY, None)
+    if isinstance(state, _SeedLockState):
+        try:
+            if state.file_handle is not None:
+                _close_file_lock(state.file_handle)
+        finally:
+            _SEED_LOCK.release()
+    elif state:
         _SEED_LOCK.release()
 
 
 def acquire_quantxy_seed_transaction_lock(session: Session) -> None:
-    """Serialize demo seed writes until the caller's transaction ends."""
+    """Serialize demo seed writes until the caller's transaction ends.
+
+    File-backed SQLite also uses a lock beside that database. This is not a
+    cross-process advisory-lock implementation for other database engines.
+    """
     if session.info.get(_SESSION_LOCK_KEY):
         return
     _SEED_LOCK.acquire()
-    session.info[_SESSION_LOCK_KEY] = True
+    file_handle: BinaryIO | None = None
+    try:
+        lock_path = _sqlite_seed_lock_path(session)
+        if lock_path is not None:
+            file_handle = _open_file_lock(lock_path)
+        if not session.in_transaction():
+            session.begin()
+        session.info[_SESSION_LOCK_KEY] = _SeedLockState(file_handle=file_handle)
+    except BaseException:
+        if file_handle is not None:
+            _close_file_lock(file_handle)
+        _SEED_LOCK.release()
+        raise
 
 
 def _has_workbench_organization(session: Session, tenant_id: str) -> bool:

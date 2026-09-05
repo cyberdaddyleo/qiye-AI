@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import multiprocessing
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
+from typing import Any
 
 import pytest
+from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db.models import (
@@ -20,7 +24,10 @@ from app.db.models import (
     WorkTaskEvent,
 )
 from app.db.seed import seed_demo_data
-from app.db.workbench_seed import seed_quantxy_workbench
+from app.db.workbench_seed import (
+    acquire_quantxy_seed_transaction_lock,
+    seed_quantxy_workbench,
+)
 from app.workbench.schema import PlanPreviewRequest
 from app.workbench.service import build_plan, dispatch_plan
 
@@ -92,6 +99,243 @@ EXPECTED_DEPENDENCIES = {
 
 def _model_ids(db: Session, model: type) -> tuple[str, ...]:
     return tuple(sorted(row.id for row in db.exec(select(model)).all()))
+
+
+def _seed_demo_data_in_process(
+    database_url: str,
+    data_dir: str,
+    start: Any,
+    results: Any,
+) -> None:
+    os.environ["DATABASE_URL"] = database_url
+    os.environ["ULTRARAG_DATA_DIR"] = data_dir
+    os.environ["ULTRARAG_DOTENV"] = "/dev/null"
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    process_engine = create_engine(
+        database_url,
+        connect_args={"check_same_thread": False, "timeout": 0.001},
+    )
+    try:
+        start.wait(timeout=15)
+        with Session(process_engine) as db:
+            seed_demo_data(db)
+        results.put(("ok", None))
+    except Exception as exc:  # noqa: BLE001 - report child failures to the parent process
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        process_engine.dispose()
+
+
+def _fail_seed_then_wait_in_process(
+    database_url: str,
+    cleanup: str,
+    cleaned_up: Any,
+    finish: Any,
+    results: Any,
+) -> None:
+    process_engine = create_engine(
+        database_url,
+        connect_args={"check_same_thread": False, "timeout": 0.001},
+    )
+    db = Session(process_engine)
+    try:
+        try:
+            seed_quantxy_workbench(db)
+        except RuntimeError as exc:
+            if cleanup == "rollback":
+                db.rollback()
+            else:
+                db.close()
+            results.put(("holder_cleaned", type(exc).__name__))
+        else:
+            results.put(("holder_error", "seed unexpectedly succeeded"))
+        cleaned_up.set()
+        finish.wait(timeout=15)
+    except Exception as exc:  # noqa: BLE001 - report child failures to the parent process
+        results.put(("holder_error", f"{type(exc).__name__}: {exc}"))
+        cleaned_up.set()
+    finally:
+        db.close()
+        process_engine.dispose()
+
+
+def _seed_quantxy_workbench_in_process(database_url: str, results: Any) -> None:
+    process_engine = create_engine(
+        database_url,
+        connect_args={"check_same_thread": False, "timeout": 0.001},
+    )
+    try:
+        with Session(process_engine) as db:
+            seed_quantxy_workbench(db)
+            db.commit()
+        results.put(("contender_ok", None))
+    except Exception as exc:  # noqa: BLE001 - report child failures to the parent process
+        results.put(("contender_error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        process_engine.dispose()
+
+
+def test_demo_seed_serializes_two_spawned_processes_on_one_wal_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "multiprocess-seed.db"
+    database_url = f"sqlite:///{database_path}"
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("ULTRARAG_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ULTRARAG_DOTENV", "/dev/null")
+
+    engine = create_engine(database_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with engine.connect() as connection:
+        journal_mode = connection.execute(text("PRAGMA journal_mode=WAL")).scalar_one()
+    assert journal_mode == "wal"
+    engine.dispose()
+
+    context = multiprocessing.get_context("spawn")
+    start = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_seed_demo_data_in_process,
+            args=(database_url, str(data_dir), start, results),
+        )
+        for _ in range(2)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=30)
+        outcomes = [results.get(timeout=5) for _ in processes]
+
+        assert [process.exitcode for process in processes] == [0, 0]
+        assert outcomes == [("ok", None), ("ok", None)]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        results.close()
+        results.join_thread()
+
+    verification_engine = create_engine(database_url)
+    with Session(verification_engine) as db:
+        assert _model_ids(db, Department) == tuple(sorted(EXPECTED_DEPARTMENTS))
+        assert _model_ids(db, EmployeeProfile) == tuple(sorted(EXPECTED_EMPLOYEES))
+        assert _model_ids(db, WorkProject) == ("project_quantxy_delivery_example",)
+        assert set(_model_ids(db, WorkTask)) == EXPECTED_TASK_IDS
+        assert len(_model_ids(db, WorkTaskDependency)) == len(EXPECTED_DEPENDENCIES)
+        assert set(_model_ids(db, WorkTaskEvent)) == {
+            event_id
+            for event_ids in EXPECTED_TASK_EVENT_IDS.values()
+            for event_id in event_ids
+        }
+    verification_engine.dispose()
+    assert database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    ).is_file()
+
+
+@pytest.mark.parametrize("cleanup", ["rollback", "close"])
+def test_sqlite_seed_lock_releases_after_failed_session_cleanup(
+    cleanup: str,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / f"failed-{cleanup}.db"
+    database_url = f"sqlite:///{database_path}"
+    engine = create_engine(database_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with engine.connect() as connection:
+        assert connection.execute(text("PRAGMA journal_mode=WAL")).scalar_one() == "wal"
+    engine.dispose()
+
+    context = multiprocessing.get_context("spawn")
+    cleaned_up = context.Event()
+    finish = context.Event()
+    results = context.Queue()
+    holder = context.Process(
+        target=_fail_seed_then_wait_in_process,
+        args=(database_url, cleanup, cleaned_up, finish, results),
+    )
+    contender: multiprocessing.Process | None = None
+    try:
+        holder.start()
+        assert cleaned_up.wait(timeout=15)
+        assert results.get(timeout=5) == ("holder_cleaned", "RuntimeError")
+
+        setup_engine = create_engine(database_url)
+        with Session(setup_engine) as db:
+            db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
+            db.add_all(
+                [
+                    User(
+                        id="admin",
+                        tenant_id="tenant_demo",
+                        username="admin",
+                        role="admin",
+                        password_hash="admin-hash",
+                    ),
+                    User(
+                        id="user_demo",
+                        tenant_id="tenant_demo",
+                        username="user_demo",
+                        password_hash="demo-hash",
+                    ),
+                ]
+            )
+            db.commit()
+        setup_engine.dispose()
+
+        contender = context.Process(
+            target=_seed_quantxy_workbench_in_process,
+            args=(database_url, results),
+        )
+        contender.start()
+        contender.join(timeout=15)
+        assert contender.exitcode == 0
+        assert results.get(timeout=5) == ("contender_ok", None)
+    finally:
+        finish.set()
+        holder.join(timeout=5)
+        for process in (holder, contender):
+            if process is not None and process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        results.close()
+        results.join_thread()
+
+    assert holder.exitcode == 0
+    assert database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    ).is_file()
+
+
+def test_sqlite_seed_lock_closes_file_and_thread_lock_when_acquisition_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db import workbench_seed
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'failed-acquisition.db'}")
+    captured_handle: list[Any] = []
+
+    def fail_lock(handle: Any) -> None:
+        captured_handle.append(handle)
+        raise OSError("lock acquisition failed")
+
+    monkeypatch.setattr(workbench_seed, "_lock_file", fail_lock)
+    with Session(engine) as db, pytest.raises(OSError, match="lock acquisition failed"):
+        acquire_quantxy_seed_transaction_lock(db)
+
+    assert len(captured_handle) == 1
+    assert captured_handle[0].closed
+    assert workbench_seed._SEED_LOCK.acquire(blocking=False)
+    workbench_seed._SEED_LOCK.release()
+    engine.dispose()
 
 
 def test_quantxy_workbench_seed_serializes_two_real_sessions(tmp_path: Path) -> None:
