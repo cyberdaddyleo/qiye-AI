@@ -16,6 +16,7 @@ import type {
   ProjectRead,
   TaskCommentRequest,
   TaskListQuery,
+  TaskPageRead,
   TaskRead,
   TaskReviewRequest,
   TaskSubmitRequest,
@@ -26,10 +27,10 @@ import type {
 
 const WORKBENCH_API = '/api/enterprise/workbench';
 
-function queryPath(path: string, values: Record<string, string | undefined>): string {
+function queryPath(path: string, values: Record<string, string | number | undefined>): string {
   const query = new URLSearchParams();
   Object.entries(values).forEach(([key, value]) => {
-    if (value !== undefined && value !== '') query.set(key, value);
+    if (value !== undefined && value !== '') query.set(key, String(value));
   });
   const suffix = query.toString();
   return suffix ? `${path}?${suffix}` : path;
@@ -87,6 +88,19 @@ export function listTasks(query: TaskListQuery = {}): Promise<TaskRead[]> {
     scope: query.scope,
     status: query.status,
     project_id: query.project_id,
+    limit: query.limit,
+    offset: query.offset,
+  }));
+}
+
+export function listTasksPage(query: TaskListQuery = {}): Promise<TaskPageRead> {
+  return api.get(queryPath(`${WORKBENCH_API}/tasks/page`, {
+    tenant_id: query.tenant_id || TENANT_ID,
+    scope: query.scope,
+    status: query.status,
+    project_id: query.project_id,
+    limit: query.limit,
+    offset: query.offset,
   }));
 }
 
@@ -169,6 +183,7 @@ export const workbenchApi = {
   previewPlan,
   dispatchPlan,
   listTasks,
+  listTasksPage,
   getTask,
   updateTask,
   commentTask,

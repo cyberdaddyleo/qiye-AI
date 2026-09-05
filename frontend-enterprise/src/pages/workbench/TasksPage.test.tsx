@@ -24,6 +24,16 @@ import { workbenchApi } from './workbenchApi';
 
 vi.mock('./workbenchApi', async (importOriginal) => {
   const original = await importOriginal<typeof import('./workbenchApi')>();
+  const listTasks = vi.fn();
+  const listTasksPage = vi.fn(async (query: { limit?: number; offset?: number }) => {
+    const items = await listTasks(query) as TaskRead[];
+    return {
+      items,
+      total: items.length,
+      limit: query.limit ?? 50,
+      offset: query.offset ?? 0,
+    };
+  });
   return {
     ...original,
     workbenchApi: {
@@ -32,7 +42,8 @@ vi.mock('./workbenchApi', async (importOriginal) => {
       getDashboard: vi.fn(),
       listProjects: vi.fn(),
       listEmployees: vi.fn(),
-      listTasks: vi.fn(),
+      listTasks,
+      listTasksPage,
       getTask: vi.fn(),
       updateTask: vi.fn(),
       commentTask: vi.fn(),
@@ -58,6 +69,14 @@ const member: EnterpriseAuthUser = {
   role: 'member',
 };
 
+const globalAdmin: EnterpriseAuthUser = {
+  ...manager,
+  id: 'user-global-admin',
+  username: 'global-admin',
+  display_name: '全局管理员',
+  role: 'admin',
+};
+
 const managerAccess: WorkbenchAccessRead = {
   tenant_id: manager.tenant_id,
   user_id: manager.id,
@@ -75,6 +94,16 @@ const memberAccess: WorkbenchAccessRead = {
   directory_scope: 'self',
   can_create_project: false,
   can_view_all: false,
+  managed_department_ids: [],
+};
+
+const globalAdminAccess: WorkbenchAccessRead = {
+  tenant_id: globalAdmin.tenant_id,
+  user_id: globalAdmin.id,
+  business_role: 'admin',
+  directory_scope: 'all',
+  can_create_project: true,
+  can_view_all: true,
   managed_department_ids: [],
 };
 
@@ -316,6 +345,8 @@ describe('TasksPage', () => {
         scope: 'department',
         status: 'review',
         project_id: undefined,
+        limit: 50,
+        offset: 0,
       });
     });
     await user.selectOptions(screen.getByLabelText('项目筛选'), project.id);
@@ -325,8 +356,77 @@ describe('TasksPage', () => {
         scope: 'department',
         status: 'review',
         project_id: project.id,
+        limit: 50,
+        offset: 0,
       });
     });
+  });
+
+  it('paginates task results in 50-row pages and resets to the first page when filters change', async () => {
+    const firstPage = Array.from({ length: 50 }, (_, index) =>
+      task('backlog', `task-page-${index + 1}`, `分页任务 ${index + 1}`),
+    );
+    const secondPage = Array.from({ length: 50 }, (_, index) =>
+      task('backlog', `task-page-${index + 51}`, `分页任务 ${index + 51}`),
+    );
+    const boundary = task('backlog', 'task-page-101', '分页任务 101');
+    const filtered = [task('done', 'task-filtered-done', '筛选后的已完成任务')];
+    vi.mocked(workbenchApi.listTasksPage)
+      .mockResolvedValueOnce({ items: firstPage, total: 101, limit: 50, offset: 0 })
+      .mockResolvedValueOnce({ items: secondPage, total: 101, limit: 50, offset: 50 })
+      .mockResolvedValueOnce({ items: [boundary], total: 101, limit: 50, offset: 100 })
+      .mockResolvedValueOnce({ items: filtered, total: 1, limit: 50, offset: 0 });
+    const user = userEvent.setup();
+    renderTasks();
+
+    expect(await screen.findByText('分页任务 50')).toBeTruthy();
+    expect(screen.queryByText('分页任务 101')).toBeNull();
+    expect(workbenchApi.listTasksPage).toHaveBeenLastCalledWith({
+      tenant_id: manager.tenant_id,
+      scope: 'department',
+      status: undefined,
+      project_id: undefined,
+      limit: 50,
+      offset: 0,
+    });
+    expect(screen.getByRole('button', { name: '上一页' })).toHaveProperty('disabled', true);
+
+    await user.click(screen.getByRole('button', { name: '下一页' }));
+    expect(await screen.findByText('分页任务 100')).toBeTruthy();
+    expect(workbenchApi.listTasksPage).toHaveBeenLastCalledWith({
+      tenant_id: manager.tenant_id,
+      scope: 'department',
+      status: undefined,
+      project_id: undefined,
+      limit: 50,
+      offset: 50,
+    });
+    expect(screen.getByRole('button', { name: '下一页' })).toHaveProperty('disabled', false);
+    expect(screen.getByRole('button', { name: '上一页' })).toHaveProperty('disabled', false);
+
+    await user.click(screen.getByRole('button', { name: '下一页' }));
+    expect(await screen.findByText('分页任务 101')).toBeTruthy();
+    expect(workbenchApi.listTasksPage).toHaveBeenLastCalledWith({
+      tenant_id: manager.tenant_id,
+      scope: 'department',
+      status: undefined,
+      project_id: undefined,
+      limit: 50,
+      offset: 100,
+    });
+    expect(screen.getByRole('button', { name: '下一页' })).toHaveProperty('disabled', true);
+
+    await user.selectOptions(screen.getByLabelText('状态筛选'), 'done');
+    expect(await screen.findByText('筛选后的已完成任务')).toBeTruthy();
+    expect(workbenchApi.listTasksPage).toHaveBeenLastCalledWith({
+      tenant_id: manager.tenant_id,
+      scope: 'department',
+      status: 'done',
+      project_id: undefined,
+      limit: 50,
+      offset: 0,
+    });
+    expect(screen.getByRole('button', { name: '上一页' })).toHaveProperty('disabled', true);
   });
 
   it('shows dependencies, acceptance, delivery, reviewer feedback, and chronological events', async () => {
@@ -338,7 +438,7 @@ describe('TasksPage', () => {
     expect(within(dialog).getByText('高优先级')).toBeTruthy();
     expect(screen.getByRole('button', { name: '查看依赖 完成定位研究' })).toBeTruthy();
     expect(screen.getByText('交付内容通过负责人验收')).toBeTruthy();
-    expect(screen.getAllByText('已完成第一版交付')).toHaveLength(2);
+    expect(screen.getAllByText('已完成第一版交付')).toHaveLength(1);
     expect(screen.getAllByText('请补充关键数据来源')).toHaveLength(2);
 
     const timeline = screen.getByRole('list', { name: '任务动态' });
@@ -577,6 +677,10 @@ describe('TasksPage', () => {
     expect(screen.queryByRole('button', { name: '保存进度' })).toBeNull();
     expect(screen.queryByRole('button', { name: /提交成果/ })).toBeNull();
     expect(screen.queryByRole('button', { name: '开始任务' })).toBeNull();
+    if (status === 'done' || status === 'canceled') {
+      expect(screen.queryByLabelText('添加评论')).toBeNull();
+      expect(screen.queryByRole('button', { name: '发表评论' })).toBeNull();
+    }
     cleanup();
   });
 
@@ -687,6 +791,49 @@ describe('TasksPage', () => {
       }
       cleanup();
     }
+  });
+
+  it('allows only the assignee to execute, even when another user owns or manages the project', async () => {
+    const delegated = task('in_progress', 'task-delegated-execution', '不能代替成员执行', {
+      assignee_user_id: member.id,
+      reviewer_user_id: 'user-other-reviewer',
+    });
+    vi.mocked(workbenchApi.listTasks).mockResolvedValue([delegated]);
+    vi.mocked(workbenchApi.getTask).mockResolvedValue(delegated);
+    let user = userEvent.setup();
+    renderTasks(manager);
+
+    await user.click(await screen.findByRole('button', { name: '打开任务 不能代替成员执行' }));
+    expect(screen.queryByLabelText('任务进度')).toBeNull();
+    expect(screen.queryByRole('button', { name: '保存进度' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /提交成果/ })).toBeNull();
+    cleanup();
+
+    const adminDelegated = task('backlog', 'task-admin-delegated', '管理员也不能代执行', {
+      assignee_user_id: member.id,
+    });
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(globalAdminAccess);
+    vi.mocked(workbenchApi.listTasks).mockResolvedValue([adminDelegated]);
+    vi.mocked(workbenchApi.getTask).mockResolvedValue(adminDelegated);
+    user = userEvent.setup();
+    renderTasks(globalAdmin);
+
+    await user.click(await screen.findByRole('button', { name: '打开任务 管理员也不能代执行' }));
+    expect(screen.queryByRole('button', { name: '开始任务' })).toBeNull();
+    cleanup();
+
+    const managedReview = task('review', 'task-managed-review', '管理者仍可审核', {
+      assignee_user_id: member.id,
+      reviewer_user_id: 'user-other-reviewer',
+    });
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(managerAccess);
+    vi.mocked(workbenchApi.listTasks).mockResolvedValue([managedReview]);
+    vi.mocked(workbenchApi.getTask).mockResolvedValue(managedReview);
+    user = userEvent.setup();
+    renderTasks(manager);
+
+    await user.click(await screen.findByRole('button', { name: '打开任务 管理者仍可审核' }));
+    expect(screen.getByRole('button', { name: '审核通过' })).toBeTruthy();
   });
 
   it('refreshes authoritative server state and explains a 409 version conflict', async () => {
@@ -915,6 +1062,54 @@ describe('MyWorkPage', () => {
     await user.click(screen.getByRole('button', { name: '打开任务 整理今日访谈' }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(screen.getByRole('button', { name: '提交成果' })).toBeTruthy();
+  });
+
+  it('loads more than 100 personal tasks in 50-row pages without dropping the boundary task', async () => {
+    const firstPage = Array.from({ length: 50 }, (_, index) =>
+      task('in_progress', `task-my-work-page-${index + 1}`, `我的分页任务 ${index + 1}`),
+    );
+    const secondPage = Array.from({ length: 50 }, (_, index) =>
+      task('in_progress', `task-my-work-page-${index + 51}`, `我的分页任务 ${index + 51}`),
+    );
+    const boundary = {
+      ...task('in_progress', 'task-my-work-page-101', '我的分页任务 101'),
+      title: '第 101 条待处理任务',
+    };
+    vi.mocked(workbenchApi.listTasksPage)
+      .mockResolvedValueOnce({ items: firstPage, total: 101, limit: 50, offset: 0 })
+      .mockResolvedValueOnce({ items: secondPage, total: 101, limit: 50, offset: 50 })
+      .mockResolvedValueOnce({ items: [boundary], total: 101, limit: 50, offset: 100 });
+    const user = userEvent.setup();
+    renderMyWork();
+
+    expect(await screen.findByText('我的分页任务 50')).toBeTruthy();
+    expect(screen.queryByText('第 101 条待处理任务')).toBeNull();
+    expect(workbenchApi.listTasksPage).toHaveBeenLastCalledWith({
+      tenant_id: member.tenant_id,
+      scope: 'mine',
+      limit: 50,
+      offset: 0,
+    });
+
+    await user.click(screen.getByRole('button', { name: '加载更多任务' }));
+    expect((await screen.findAllByText('我的分页任务 100')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('第 101 条待处理任务')).toBeNull();
+    expect(workbenchApi.listTasksPage).toHaveBeenLastCalledWith({
+      tenant_id: member.tenant_id,
+      scope: 'mine',
+      limit: 50,
+      offset: 50,
+    });
+
+    await user.click(screen.getByRole('button', { name: '加载更多任务' }));
+    expect((await screen.findAllByText('第 101 条待处理任务')).length).toBeGreaterThan(0);
+    expect(workbenchApi.listTasksPage).toHaveBeenLastCalledWith({
+      tenant_id: member.tenant_id,
+      scope: 'mine',
+      limit: 50,
+      offset: 100,
+    });
+    expect(screen.queryByRole('button', { name: '加载更多任务' })).toBeNull();
   });
 
   it('wires progress and artifact resubmission through My Work with current task versions', async () => {

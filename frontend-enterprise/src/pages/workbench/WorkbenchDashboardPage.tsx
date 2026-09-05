@@ -22,6 +22,7 @@ import type {
   ProjectRead,
   TaskRead,
   WorkTaskEventRead,
+  WorkbenchAccessRead,
   WorkloadRow,
 } from '@/types/workbench';
 
@@ -151,6 +152,7 @@ export default function WorkbenchDashboardPage({
   onLogout,
 }: WorkbenchDashboardPageProps) {
   const [dashboard, setDashboard] = useState<DashboardRead | null>(null);
+  const [access, setAccess] = useState<WorkbenchAccessRead | null>(null);
   const [employees, setEmployees] = useState<EmployeeRead[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
@@ -162,20 +164,30 @@ export default function WorkbenchDashboardPage({
     setLoading(true);
     setError(null);
     setEmployeeError(null);
+    const accessRequest = workbenchApi.getAccess(currentUser.tenant_id);
     const dashboardRequest = workbenchApi.getDashboard(currentUser.tenant_id);
     const employeeRequest = workbenchApi.listEmployees(currentUser.tenant_id);
-    void Promise.allSettled([dashboardRequest, employeeRequest]).then(([dashboardResult, employeeResult]) => {
+    void Promise.allSettled([accessRequest, dashboardRequest, employeeRequest]).then(([accessResult, dashboardResult, employeeResult]) => {
       if (!active) return;
-      if (dashboardResult.status === 'rejected') {
-        setError(dashboardResult.reason);
+      if (accessResult.status === 'rejected') {
+        setError(accessResult.reason);
+        setAccess(null);
         setDashboard(null);
+        setEmployees([]);
+      } else if (dashboardResult.status === 'rejected') {
+        setError(dashboardResult.reason);
+        setAccess(null);
+        setDashboard(null);
+        setEmployees([]);
       } else {
+        setAccess(accessResult.value);
         setDashboard(normalizeDashboard(dashboardResult.value));
         if (employeeResult.status === 'fulfilled') {
           setEmployees(Array.isArray(employeeResult.value) ? employeeResult.value : []);
         } else {
           setEmployees([]);
-          const expectedMemberDenial = currentUser.role === 'member'
+          const expectedMemberDenial = accessResult.value.business_role === 'member'
+            && accessResult.value.directory_scope === 'self'
             && employeeResult.reason instanceof ApiError
             && employeeResult.reason.status === 403;
           if (!expectedMemberDenial) setEmployeeError(employeeResult.reason);
@@ -186,15 +198,16 @@ export default function WorkbenchDashboardPage({
     return () => {
       active = false;
     };
-  }, [currentUser.role, currentUser.tenant_id, refreshKey]);
+  }, [currentUser.tenant_id, refreshKey]);
 
   const employeeByUserId = useMemo(
     () => new Map(employees.map((employee) => [employee.user_id, employee])),
     [employees],
   );
-  const self = employeeByUserId.get(currentUser.id);
-  const isGlobalView = currentUser.role === 'admin' || self?.business_role === 'ceo';
-  const isManagerView = isGlobalView || self?.business_role === 'manager';
+  const isGlobalView = Boolean(access?.can_view_all && access.directory_scope === 'all');
+  const isManagerView = isGlobalView || Boolean(
+    access?.business_role === 'manager' && access.directory_scope === 'department',
+  );
   const data = dashboard || EMPTY_DASHBOARD;
   const activeTaskCount = ['backlog', 'blocked', 'in_progress', 'review']
     .reduce((total, status) => total + (data.task_counts[status as keyof typeof data.task_counts] || 0), 0);

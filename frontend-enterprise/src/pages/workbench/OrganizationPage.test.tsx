@@ -298,6 +298,16 @@ describe('OrganizationPage', () => {
     expect(workbenchApi.createEmployee).not.toHaveBeenCalled();
   });
 
+  it('shows active and inactive employment status explicitly in the employee list', async () => {
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([employee, inactiveEmployee]);
+
+    renderOrganization();
+
+    const table = await screen.findByRole('table', { name: '员工组织列表' });
+    expect(within(table).getByText('在岗')).toBeTruthy();
+    expect(within(table).getByText('已停用')).toBeTruthy();
+  });
+
   it.each([
     [403, '当前账号无权创建员工档案。'],
     [409, '该账号已有员工档案，已刷新组织数据。'],
@@ -448,7 +458,11 @@ describe('OrganizationPage', () => {
       manager_user_id: currentManager.user_id,
     };
     vi.mocked(workbenchApi.listDepartments).mockResolvedValueOnce([managedDepartment]);
-    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([currentManager]);
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([
+      currentManager,
+      employee,
+      inactiveEmployee,
+    ]);
     vi.mocked(workbenchApi.updateEmployee).mockResolvedValueOnce({
       ...currentManager,
       job_title: '产品总监',
@@ -464,6 +478,12 @@ describe('OrganizationPage', () => {
     const businessRole = within(editor).getByLabelText('业务角色');
     expect(businessRole).toHaveProperty('readOnly', true);
     expect(businessRole).toHaveProperty('value', '部门负责人');
+    expect(within(editor).getByLabelText('所属部门')).toHaveProperty('disabled', true);
+    expect(within(editor).getByLabelText('状态')).toHaveProperty('disabled', true);
+    expect(within(editor).getByText('如需变更所属部门或停用该员工，请先解除其部门负责人任命。')).toBeTruthy();
+    const directManager = within(editor).getByLabelText('直属经理');
+    expect(within(directManager).getByRole('option', { name: '林珊' })).toBeTruthy();
+    expect(within(directManager).queryByRole('option', { name: '离职员工' })).toBeNull();
 
     const title = within(editor).getByLabelText('岗位');
     await user.clear(title);
@@ -491,6 +511,18 @@ describe('OrganizationPage', () => {
     });
     const updatePayload = vi.mocked(workbenchApi.updateEmployee).mock.calls[0]?.[1];
     expect(updatePayload).not.toHaveProperty('business_role');
+  });
+
+  it('does not offer inactive employees as direct-manager candidates', async () => {
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([employee, inactiveEmployee]);
+    const user = userEvent.setup();
+    renderOrganization();
+    await screen.findByText('林珊');
+
+    await user.click(screen.getByRole('button', { name: '编辑林珊' }));
+    const editor = await screen.findByRole('dialog', { name: '编辑员工：林珊' });
+    const directManager = within(editor).getByLabelText('直属经理');
+    expect(within(directManager).queryByRole('option', { name: '离职员工' })).toBeNull();
   });
 
   it('edits a real employee and binds an existing AI assistant as a capability', async () => {

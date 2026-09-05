@@ -136,9 +136,7 @@ export default function TaskDetailSheet({
     && access?.managed_department_ids.includes(project.department_id),
   );
   const canManageProject = Boolean(access?.can_view_all || projectOwner || managedProject);
-  const canExecute = Boolean(task && (
-    task.assignee_user_id === currentUser.id || canManageProject
-  ));
+  const canExecute = Boolean(task?.assignee_user_id === currentUser.id);
   const canReview = Boolean(task && (
     task.reviewer_user_id === currentUser.id || canManageProject
   ));
@@ -334,15 +332,17 @@ export default function TaskDetailSheet({
                 </section>
               )}
 
-              <section className="rounded-[14px] border border-[#edf0f5] bg-white p-[15px]">
-                <label className="grid gap-[6px]">
-                  <span className="flex items-center gap-[5px] text-[11px] font-medium text-[#596176]"><MessageSquareText className="size-[12px]" aria-hidden="true" />添加评论</span>
-                  <Textarea value={comment} onChange={(event) => setComment(event.target.value)} className="min-h-[68px] rounded-[9px] border-[#e3e7f1] text-[11px]" />
-                </label>
-                <div className="mt-[8px] flex justify-end">
-                  <Button type="button" disabled={busy || !comment.trim()} onClick={() => void submitComment()} className="h-[31px] gap-[5px] rounded-[8px] bg-[#18181a] px-[12px] text-[10px] text-white hover:bg-[#303030]"><Send className="size-[11px]" aria-hidden="true" />发表评论</Button>
-                </div>
-              </section>
+              {task.status !== 'done' && task.status !== 'canceled' && (
+                <section className="rounded-[14px] border border-[#edf0f5] bg-white p-[15px]">
+                  <label className="grid gap-[6px]">
+                    <span className="flex items-center gap-[5px] text-[11px] font-medium text-[#596176]"><MessageSquareText className="size-[12px]" aria-hidden="true" />添加评论</span>
+                    <Textarea value={comment} onChange={(event) => setComment(event.target.value)} className="min-h-[68px] rounded-[9px] border-[#e3e7f1] text-[11px]" />
+                  </label>
+                  <div className="mt-[8px] flex justify-end">
+                    <Button type="button" disabled={busy || !comment.trim()} onClick={() => void submitComment()} className="h-[31px] gap-[5px] rounded-[8px] bg-[#18181a] px-[12px] text-[10px] text-white hover:bg-[#303030]"><Send className="size-[11px]" aria-hidden="true" />发表评论</Button>
+                  </div>
+                </section>
+              )}
 
               {task.status === 'in_progress' && canExecute && (
                 <section className="rounded-[14px] border border-[#dfe6f2] bg-white p-[15px]">

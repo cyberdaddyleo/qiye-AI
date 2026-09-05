@@ -3,6 +3,7 @@ import type { WorkTaskEventRead } from '@/types/workbench';
 const EVENT_ACTION: Record<string, string> = {
   task_created: '创建了任务',
   task_assigned: '分配了真人负责人',
+  task_unassigned: '取消了真人负责人分配',
   task_started: '开始了任务',
   task_updated: '更新了任务',
   progress_updated: '更新了进度',

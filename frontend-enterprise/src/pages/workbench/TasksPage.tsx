@@ -38,6 +38,8 @@ type LoadFailure = {
   reason: unknown;
 };
 
+const TASK_PAGE_SIZE = 50;
+
 function defaultScope(access: WorkbenchAccessRead): TaskScope {
   if (access.directory_scope === 'all') return 'all';
   if (access.directory_scope === 'department') return 'department';
@@ -59,6 +61,8 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
   const [projects, setProjects] = useState<ProjectRead[]>([]);
   const [employees, setEmployees] = useState<EmployeeRead[]>([]);
   const [tasks, setTasks] = useState<TaskRead[]>([]);
+  const [page, setPage] = useState(0);
+  const [totalTasks, setTotalTasks] = useState(0);
   const [filters, setFilters] = useState<TaskFilters>({ scope: 'mine', status: '', projectId: requestedProjectId });
   const [loading, setLoading] = useState(true);
   const [failure, setFailure] = useState<LoadFailure | null>(null);
@@ -119,15 +123,19 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
       setProjects(nextProjects);
       setEmployees(nextEmployees);
       setFilters(nextFilters);
+      setPage(0);
       try {
-        const nextTasks = await workbenchApi.listTasks({
+        const taskPage = await workbenchApi.listTasksPage({
           tenant_id: currentUser.tenant_id,
           scope,
           status: undefined,
           project_id: projectId || undefined,
+          limit: TASK_PAGE_SIZE,
+          offset: 0,
         });
         if (!active) return;
-        setTasks(Array.isArray(nextTasks) ? nextTasks : []);
+        setTasks(Array.isArray(taskPage.items) ? taskPage.items : []);
+        setTotalTasks(taskPage.total);
       } catch (caught) {
         if (!active) return;
         setFailure({ source: 'tasks', reason: caught });
@@ -150,22 +158,42 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
   );
   const groupedTasks = useMemo(() => groupTasksByStatus(tasks), [tasks]);
 
-  function taskQuery(nextFilters: TaskFilters) {
+  function taskQuery(nextFilters: TaskFilters, pageIndex = page) {
     return {
       tenant_id: currentUser.tenant_id,
       scope: nextFilters.scope,
       status: nextFilters.status || undefined,
       project_id: nextFilters.projectId || undefined,
+      limit: TASK_PAGE_SIZE,
+      offset: pageIndex * TASK_PAGE_SIZE,
     };
   }
 
   async function applyFilters(nextFilters: TaskFilters) {
     setFilters(nextFilters);
+    setPage(0);
     setLoading(true);
     setFailure(null);
     try {
-      const nextTasks = await workbenchApi.listTasks(taskQuery(nextFilters));
-      setTasks(Array.isArray(nextTasks) ? nextTasks : []);
+      const taskPage = await workbenchApi.listTasksPage(taskQuery(nextFilters, 0));
+      setTasks(Array.isArray(taskPage.items) ? taskPage.items : []);
+      setTotalTasks(taskPage.total);
+    } catch (caught) {
+      setFailure({ source: 'tasks', reason: caught });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function changePage(nextPage: number) {
+    if (nextPage < 0 || nextPage === page) return;
+    setLoading(true);
+    setFailure(null);
+    try {
+      const taskPage = await workbenchApi.listTasksPage(taskQuery(filters, nextPage));
+      setTasks(Array.isArray(taskPage.items) ? taskPage.items : []);
+      setTotalTasks(taskPage.total);
+      setPage(nextPage);
     } catch (caught) {
       setFailure({ source: 'tasks', reason: caught });
     } finally {
@@ -193,7 +221,7 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
   async function refetchTaskState(taskId: string) {
     const [detailResult, listResult] = await Promise.allSettled([
       workbenchApi.getTask(taskId, currentUser.tenant_id),
-      workbenchApi.listTasks(taskQuery(filters)),
+      workbenchApi.listTasksPage(taskQuery(filters)),
     ]);
     if (detailResult.status === 'fulfilled') {
       setDetailTask(detailResult.value);
@@ -202,7 +230,8 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
       setDetailError(detailResult.reason);
     }
     if (listResult.status === 'fulfilled') {
-      setTasks(Array.isArray(listResult.value) ? listResult.value : []);
+      setTasks(Array.isArray(listResult.value.items) ? listResult.value.items : []);
+      setTotalTasks(listResult.value.total);
       setFailure(null);
     } else {
       setFailure({ source: 'tasks', reason: listResult.reason });
@@ -300,6 +329,14 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
             ))}
           </div>
         </section>
+      )}
+
+      {!loading && !failure && (
+        <nav aria-label="任务分页" className="mt-[12px] flex flex-wrap items-center justify-end gap-[8px]">
+          <span className="mr-auto text-[10px] text-[#858b9c]">第 {page + 1} 页 · 共 {totalTasks} 项任务</span>
+          <Button type="button" variant="outline" disabled={page === 0} onClick={() => void changePage(page - 1)} className="h-[31px] rounded-[8px] border-[#dce2ec] px-[12px] text-[10px] text-[#596176]">上一页</Button>
+          <Button type="button" variant="outline" disabled={(page + 1) * TASK_PAGE_SIZE >= totalTasks} onClick={() => void changePage(page + 1)} className="h-[31px] rounded-[8px] border-[#dce2ec] px-[12px] text-[10px] text-[#596176]">下一页</Button>
+        </nav>
       )}
 
       <TaskDetailSheet

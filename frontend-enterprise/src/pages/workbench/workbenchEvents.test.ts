@@ -32,6 +32,7 @@ describe('workbench event formatting', () => {
     ['review_approved', '林珊通过了任务'],
     ['review_returned', '林珊退回了任务'],
     ['dependency_unblocked', '林珊因依赖完成自动解锁了任务'],
+    ['task_unassigned', '林珊取消了真人负责人分配'],
   ])('maps the server event %s to a specific activity label', (eventType, expected) => {
     expect(formatWorkbenchEvent(event(eventType), '林珊')).toBe(expected);
   });

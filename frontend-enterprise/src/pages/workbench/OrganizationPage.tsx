@@ -61,6 +61,11 @@ const ROLE_LABEL: Record<BusinessRole, string> = {
   member: '普通员工',
 };
 
+const EMPLOYEE_STATUS_LABEL: Record<EmployeeStatus, string> = {
+  active: '在岗',
+  inactive: '已停用',
+};
+
 type EmployeeForm = {
   employeeNo: string;
   departmentId: string;
@@ -428,7 +433,9 @@ export default function OrganizationPage({
     const request: EmployeeUpdateRequest = {
       tenant_id: currentUser.tenant_id,
       employee_no: editForm.employeeNo.trim() || null,
-      department_id: editForm.departmentId || null,
+      department_id: editingEmployeeIsActiveDepartmentManager
+        ? editingEmployee.department_id
+        : editForm.departmentId || null,
       job_title: editForm.jobTitle.trim() || null,
       ...(editingEmployeeIsActiveDepartmentManager ? {} : { business_role: editForm.businessRole }),
       level: editForm.level.trim() || null,
@@ -437,7 +444,9 @@ export default function OrganizationPage({
       daily_cost: editForm.dailyCost ? Number(editForm.dailyCost) : null,
       manager_user_id: editForm.managerUserId || null,
       assistant_agent_id: editForm.assistantAgentId || null,
-      status: editForm.status,
+      status: editingEmployeeIsActiveDepartmentManager
+        ? editingEmployee.status
+        : editForm.status,
     };
     setEmployeeSaving(true);
     setEmployeeError('');
@@ -519,6 +528,18 @@ export default function OrganizationPage({
         <span className="block min-w-0">
           <span className="block truncate text-[12px] font-medium text-[#464c5e]">{employee.job_title || '未设置岗位'}</span>
           <span className="mt-[3px] block text-[11px] text-[#9aa1b3]">{ROLE_LABEL[employee.business_role]} · {employee.level || '未定级'}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      title: '状态',
+      width: 82,
+      render: (employee) => (
+        <span className={employee.status === 'active'
+          ? 'inline-flex rounded-full bg-[#e9f7ef] px-[8px] py-[3px] text-[10px] font-medium text-[#018434]'
+          : 'inline-flex rounded-full bg-[#f2f3f7] px-[8px] py-[3px] text-[10px] font-medium text-[#757f9c]'}>
+          {EMPLOYEE_STATUS_LABEL[employee.status]}
         </span>
       ),
     },
@@ -985,17 +1006,22 @@ function EmployeeEditor({
             <div className="grid min-h-0 flex-1 gap-[16px] overflow-y-auto px-[24px] py-[20px] sm:grid-cols-2">
               <Field label="员工工号"><Input value={form.employeeNo} onChange={(event) => set('employeeNo', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
               <Field label="岗位"><Input value={form.jobTitle} onChange={(event) => set('jobTitle', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
-              <Field label="所属部门"><NativeSelect value={form.departmentId} onChange={(value) => set('departmentId', value)}><option value="">未分配</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</NativeSelect></Field>
+              <Field label="所属部门"><NativeSelect value={form.departmentId} disabled={isActiveDepartmentManager} onChange={(value) => set('departmentId', value)}><option value="">未分配</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</NativeSelect></Field>
               <Field label="职级"><Input value={form.level} onChange={(event) => set('level', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
               <Field label="业务角色">{isActiveDepartmentManager
                 ? <Input aria-label="业务角色" value={t('部门负责人')} readOnly className="h-[36px] rounded-[10px] border-[#e3e7f1] bg-[#f6f8fb] text-[13px] text-[#596176]" />
                 : <NativeSelect value={form.businessRole} onChange={(value) => set('businessRole', value as AssignableBusinessRole)}><option value="member">普通员工</option>{canAssignCeo && <option value="ceo">CEO</option>}</NativeSelect>}
               </Field>
-              <Field label="状态"><NativeSelect value={form.status} onChange={(value) => set('status', value as EmployeeStatus)}><option value="active">在岗</option><option value="inactive">停用</option></NativeSelect></Field>
+              <Field label="状态"><NativeSelect value={form.status} disabled={isActiveDepartmentManager} onChange={(value) => set('status', value as EmployeeStatus)}><option value="active">在岗</option><option value="inactive">停用</option></NativeSelect></Field>
+              {isActiveDepartmentManager && (
+                <p className="m-0 rounded-[9px] bg-[#fff7e8] px-[10px] py-[8px] text-[10px] leading-[16px] text-[#8a5a00] sm:col-span-2">
+                  如需变更所属部门或停用该员工，请先解除其部门负责人任命。
+                </p>
+              )}
               <Field label="技能（逗号分隔）"><Input value={form.skills} onChange={(event) => set('skills', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
               <Field label="可用率"><Input type="number" min="0" max="100" value={form.capacityPercent} onChange={(event) => set('capacityPercent', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
               <Field label="日成本"><Input type="number" min="0" step="0.01" value={form.dailyCost} onChange={(event) => set('dailyCost', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
-              <Field label="直属经理"><NativeSelect value={form.managerUserId} onChange={(value) => set('managerUserId', value)}><option value="">未设置</option>{employees.filter((row) => row.user_id !== employee.user_id).map((row) => <option key={row.user_id} value={row.user_id}>{employeeName(row)}</option>)}</NativeSelect></Field>
+              <Field label="直属经理"><NativeSelect value={form.managerUserId} onChange={(value) => set('managerUserId', value)}><option value="">未设置</option>{employees.filter((row) => row.status === 'active' && row.user_id !== employee.user_id).map((row) => <option key={row.user_id} value={row.user_id}>{employeeName(row)}</option>)}</NativeSelect></Field>
               <div className="sm:col-span-2">
                 <Field label="AI 助理关联"><NativeSelect value={form.assistantAgentId} onChange={(value) => set('assistantAgentId', value)}><option value="">不关联</option>{assistants.map((assistant) => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}</NativeSelect></Field>
                 <p className="mt-[6px] mb-0 text-[11px] leading-[17px] text-[#858b9c]">AI 助理不会成为任务负责人，也不会继承该员工的业务权限。</p>
@@ -1013,8 +1039,8 @@ function EmployeeEditor({
   );
 }
 
-function NativeSelect({ value, onChange, children }: { value: string; onChange: (value: string) => void; children: ReactNode }) {
-  return <select value={value} onChange={(event) => onChange(event.target.value)} className="h-[36px] w-full rounded-[10px] border border-[#e3e7f1] bg-white px-[10px] text-[13px] text-[#464c5e] outline-none focus:border-[#18181a]">{children}</select>;
+function NativeSelect({ value, onChange, children, disabled = false }: { value: string; onChange: (value: string) => void; children: ReactNode; disabled?: boolean }) {
+  return <select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} className="h-[36px] w-full rounded-[10px] border border-[#e3e7f1] bg-white px-[10px] text-[13px] text-[#464c5e] outline-none focus:border-[#18181a] disabled:cursor-not-allowed disabled:bg-[#f6f8fb] disabled:text-[#858b9c]">{children}</select>;
 }
 
 function ImportDialog({

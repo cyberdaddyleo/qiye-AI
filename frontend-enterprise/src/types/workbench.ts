@@ -259,6 +259,15 @@ export type TaskListQuery = {
   scope?: TaskScope;
   status?: TaskStatus;
   project_id?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type TaskPageRead = {
+  items: TaskRead[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
 export type TaskUpdateRequest = {

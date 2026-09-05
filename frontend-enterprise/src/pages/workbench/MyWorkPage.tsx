@@ -54,6 +54,23 @@ const PRIORITY_ORDER: Record<TaskRead['priority'], number> = {
   low: 3,
 };
 
+const MY_WORK_PAGE_SIZE = 50;
+
+async function listMyWorkWindow(tenantId: string, pageCount: number) {
+  const pages = await Promise.all(Array.from({ length: pageCount }, (_, index) => (
+    workbenchApi.listTasksPage({
+      tenant_id: tenantId,
+      scope: 'mine',
+      limit: MY_WORK_PAGE_SIZE,
+      offset: index * MY_WORK_PAGE_SIZE,
+    })
+  )));
+  return {
+    items: pages.flatMap((page) => page.items),
+    total: pages[0]?.total ?? 0,
+  };
+}
+
 function roleHeadline(access: WorkbenchAccessRead, currentUser: EnterpriseAuthUser): string {
   const name = currentUser.display_name || currentUser.username;
   if (access.business_role === 'admin' || access.business_role === 'ceo') {
@@ -84,6 +101,10 @@ export default function MyWorkPage({
   const [access, setAccess] = useState<WorkbenchAccessRead | null>(null);
   const [dashboard, setDashboard] = useState<DashboardRead>(EMPTY_DASHBOARD);
   const [tasks, setTasks] = useState<TaskRead[]>([]);
+  const [totalTasks, setTotalTasks] = useState(0);
+  const [loadedPageCount, setLoadedPageCount] = useState(1);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState('');
   const [projects, setProjects] = useState<ProjectRead[]>([]);
   const [employees, setEmployees] = useState<EmployeeRead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -111,10 +132,16 @@ export default function MyWorkPage({
     let active = true;
     setLoading(true);
     setFailure(null);
+    setLoadMoreError('');
     void Promise.allSettled([
       workbenchApi.getAccess(currentUser.tenant_id),
       workbenchApi.getDashboard(currentUser.tenant_id),
-      workbenchApi.listTasks({ tenant_id: currentUser.tenant_id, scope: 'mine' }),
+      workbenchApi.listTasksPage({
+        tenant_id: currentUser.tenant_id,
+        scope: 'mine',
+        limit: MY_WORK_PAGE_SIZE,
+        offset: 0,
+      }),
       workbenchApi.listProjects(currentUser.tenant_id),
       workbenchApi.listEmployees(currentUser.tenant_id),
     ]).then(([accessResult, dashboardResult, tasksResult, projectsResult, employeesResult]) => {
@@ -143,7 +170,9 @@ export default function MyWorkPage({
             workload_rows: Array.isArray(dashboardResult.value.workload_rows) ? dashboardResult.value.workload_rows : [],
             recent_events: Array.isArray(dashboardResult.value.recent_events) ? dashboardResult.value.recent_events : [],
           });
-          setTasks(Array.isArray(tasksResult.value) ? tasksResult.value : []);
+          setTasks(Array.isArray(tasksResult.value.items) ? tasksResult.value.items : []);
+          setTotalTasks(tasksResult.value.total);
+          setLoadedPageCount(1);
           setProjects(Array.isArray(projectsResult.value) ? projectsResult.value : []);
           setEmployees(employeesResult.status === 'fulfilled' && Array.isArray(employeesResult.value) ? employeesResult.value : []);
         }
@@ -202,7 +231,7 @@ export default function MyWorkPage({
   async function refetchTaskState(taskId: string) {
     const [detailResult, tasksResult, dashboardResult] = await Promise.allSettled([
       workbenchApi.getTask(taskId, currentUser.tenant_id),
-      workbenchApi.listTasks({ tenant_id: currentUser.tenant_id, scope: 'mine' }),
+      listMyWorkWindow(currentUser.tenant_id, loadedPageCount),
       workbenchApi.getDashboard(currentUser.tenant_id),
     ]);
     if (detailResult.status === 'fulfilled') {
@@ -211,8 +240,10 @@ export default function MyWorkPage({
     } else {
       setDetailError(detailResult.reason);
     }
-    if (tasksResult.status === 'fulfilled') setTasks(Array.isArray(tasksResult.value) ? tasksResult.value : []);
-    else setFailure(tasksResult.reason);
+    if (tasksResult.status === 'fulfilled') {
+      setTasks(tasksResult.value.items);
+      setTotalTasks(tasksResult.value.total);
+    } else setFailure(tasksResult.reason);
     if (dashboardResult.status === 'fulfilled') {
       setDashboard({
         ...EMPTY_DASHBOARD,
@@ -222,6 +253,31 @@ export default function MyWorkPage({
         recent_events: Array.isArray(dashboardResult.value.recent_events) ? dashboardResult.value.recent_events : [],
       });
     } else setFailure(dashboardResult.reason);
+  }
+
+  async function loadMoreTasks() {
+    if (loadingMore || tasks.length >= totalTasks) return;
+    setLoadingMore(true);
+    setLoadMoreError('');
+    try {
+      const page = await workbenchApi.listTasksPage({
+        tenant_id: currentUser.tenant_id,
+        scope: 'mine',
+        limit: MY_WORK_PAGE_SIZE,
+        offset: loadedPageCount * MY_WORK_PAGE_SIZE,
+      });
+      setTasks((current) => {
+        const next = new Map(current.map((task) => [task.id, task]));
+        page.items.forEach((task) => next.set(task.id, task));
+        return [...next.values()];
+      });
+      setTotalTasks(page.total);
+      setLoadedPageCount((count) => count + 1);
+    } catch {
+      setLoadMoreError('更多任务加载失败，请重试。');
+    } finally {
+      setLoadingMore(false);
+    }
   }
 
   async function mutateTask(run: (task: TaskRead) => Promise<TaskRead>): Promise<boolean> {
@@ -349,6 +405,17 @@ export default function MyWorkPage({
               </ol>
             ) : <EmptyLine>还没有协作动态。</EmptyLine>}
           </Panel>
+
+          {(tasks.length < totalTasks || loadMoreError) && (
+            <div className="flex flex-col items-center gap-[8px]">
+              {loadMoreError && <p role="alert" className="m-0 text-[11px] text-[#d20b0b]">{loadMoreError}</p>}
+              {tasks.length < totalTasks && (
+                <Button type="button" variant="outline" disabled={loadingMore} onClick={() => void loadMoreTasks()} className="h-[33px] rounded-[9px] border-[#dce2ec] px-[16px] text-[11px] text-[#596176]">
+                  {loadingMore ? '加载中…' : '加载更多任务'}
+                </Button>
+              )}
+            </div>
+          )}
         </div>
       ) : null}
 

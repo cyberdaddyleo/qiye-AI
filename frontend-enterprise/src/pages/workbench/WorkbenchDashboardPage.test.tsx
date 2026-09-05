@@ -14,6 +14,7 @@ import type {
   ProjectRead,
   TaskRead,
   WorkTaskEventRead,
+  WorkbenchAccessRead,
 } from '@/types/workbench';
 
 import WorkbenchDashboardPage from './WorkbenchDashboardPage';
@@ -25,6 +26,7 @@ vi.mock('./workbenchApi', async (importOriginal) => {
     ...original,
     workbenchApi: {
       ...original.workbenchApi,
+      getAccess: vi.fn(),
       getDashboard: vi.fn(),
       listEmployees: vi.fn(),
     },
@@ -37,6 +39,46 @@ const currentUser: EnterpriseAuthUser = {
   username: 'ceo',
   display_name: '陈总',
   role: 'member',
+};
+
+const ceoAccess: WorkbenchAccessRead = {
+  tenant_id: currentUser.tenant_id,
+  user_id: currentUser.id,
+  business_role: 'ceo',
+  directory_scope: 'all',
+  can_create_project: true,
+  can_view_all: true,
+  managed_department_ids: [],
+};
+
+const memberAccess: WorkbenchAccessRead = {
+  tenant_id: currentUser.tenant_id,
+  user_id: 'user-product',
+  business_role: 'member',
+  directory_scope: 'self',
+  can_create_project: false,
+  can_view_all: false,
+  managed_department_ids: [],
+};
+
+const managerAccess: WorkbenchAccessRead = {
+  tenant_id: currentUser.tenant_id,
+  user_id: 'user-manager',
+  business_role: 'manager',
+  directory_scope: 'department',
+  can_create_project: true,
+  can_view_all: false,
+  managed_department_ids: ['department-product'],
+};
+
+const adminAccess: WorkbenchAccessRead = {
+  tenant_id: currentUser.tenant_id,
+  user_id: 'user-admin',
+  business_role: 'admin',
+  directory_scope: 'all',
+  can_create_project: true,
+  can_view_all: true,
+  managed_department_ids: [],
 };
 
 const baseEmployee: EmployeeRead = {
@@ -198,6 +240,7 @@ function renderDashboard(user = currentUser) {
 
 describe('WorkbenchDashboardPage', () => {
   beforeEach(() => {
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(ceoAccess);
     vi.mocked(workbenchApi.getDashboard).mockResolvedValue(dashboard);
     vi.mocked(workbenchApi.listEmployees).mockResolvedValue([
       baseEmployee,
@@ -232,14 +275,27 @@ describe('WorkbenchDashboardPage', () => {
     }
   });
 
-  it('shows only personal work metrics to a member and never exposes global cost', async () => {
+  it('renders and localizes the server task_unassigned event', async () => {
+    vi.mocked(workbenchApi.getDashboard).mockResolvedValueOnce({
+      ...dashboard,
+      recent_events: [{ ...recentEvent, event_type: 'task_unassigned' }],
+    });
+    window.localStorage.setItem('staffdeck_locale', 'en-US');
+
+    renderDashboard();
+
+    expect(await screen.findByText('林珊 removed the human assignee')).toBeTruthy();
+  });
+
+  it('uses self-scoped server access to degrade an employee-directory 403, regardless of auth role', async () => {
     const member: EnterpriseAuthUser = {
       id: 'user-product',
       tenant_id: 'tenant-demo',
       username: 'product',
       display_name: '林珊',
-      role: 'member',
+      role: 'admin',
     };
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(memberAccess);
     vi.mocked(workbenchApi.getDashboard).mockResolvedValue({
       ...dashboard,
       project_count: 1,
@@ -268,12 +324,14 @@ describe('WorkbenchDashboardPage', () => {
     {
       label: 'administrator',
       user: { ...currentUser, id: 'user-admin', username: 'admin', role: 'admin' as const },
+      access: adminAccess,
       employees: [baseEmployee, productEmployee],
       recoveredHeading: '公司运营概览',
     },
     {
       label: 'CEO',
       user: currentUser,
+      access: ceoAccess,
       employees: [baseEmployee, productEmployee],
       recoveredHeading: '公司运营概览',
     },
@@ -285,16 +343,21 @@ describe('WorkbenchDashboardPage', () => {
         username: managerEmployee.username,
         display_name: managerEmployee.display_name || managerEmployee.username,
       },
+      access: managerAccess,
       employees: [managerEmployee, productEmployee],
       recoveredHeading: '部门运营概览',
     },
   ])('shows a retryable partial-data error when $label employee data fails', async ({
     user: authUser,
+    access,
     employees: recoveredEmployees,
     recoveredHeading,
   }) => {
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(access);
     vi.mocked(workbenchApi.listEmployees)
-      .mockRejectedValueOnce(new Error('employee directory unavailable'))
+      .mockRejectedValueOnce(
+        new ApiError(403, '{"detail":"Cannot list employees"}', 'Forbidden'),
+      )
       .mockResolvedValueOnce(recoveredEmployees);
     const user = userEvent.setup();
 

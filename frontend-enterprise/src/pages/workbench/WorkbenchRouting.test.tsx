@@ -28,6 +28,7 @@ import {
   listEmployees,
   listProjects,
   listTasks,
+  listTasksPage,
   listTenantUsers,
   previewPlan,
   reviewTask,
@@ -328,6 +329,14 @@ describe('typed workbench API boundary', () => {
       scope: 'all',
       status: 'review',
       project_id: 'project-1',
+      limit: 51,
+      offset: 50,
+    });
+    await listTasksPage({
+      tenant_id: 'tenant_a',
+      scope: 'mine',
+      limit: 50,
+      offset: 100,
     });
     await getTask('task-1', 'tenant_a');
     await updateTask('task-1', { tenant_id: 'tenant_a', version: 2, progress: 80 });
@@ -409,7 +418,12 @@ describe('typed workbench API boundary', () => {
         },
       },
       {
-        url: '/api/enterprise/workbench/tasks?tenant_id=tenant_a&scope=all&status=review&project_id=project-1',
+        url: '/api/enterprise/workbench/tasks?tenant_id=tenant_a&scope=all&status=review&project_id=project-1&limit=51&offset=50',
+        method: 'GET',
+        body: undefined,
+      },
+      {
+        url: '/api/enterprise/workbench/tasks/page?tenant_id=tenant_a&scope=mine&limit=50&offset=100',
         method: 'GET',
         body: undefined,
       },
