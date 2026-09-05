@@ -3705,7 +3705,7 @@
   "部门负责人任命失败": "Failed to appoint department owner",
   "手工建档": "Create Profile Manually",
   "部门负责人管理": "Department Owner Management",
-  "部门任命是负责人权限的唯一来源，不会改写员工业务角色。": "Department appointment is the sole source of owner access and does not rewrite the employee business role.",
+  "部门负责人任命由部门接口原子完成，并同步员工的晋升与卸任。": "Department owner appointments are completed atomically through the department endpoint, including the corresponding employee promotion and demotion.",
   "负责人：": "Owner:",
   "尚未任命": "Not appointed",
   "任命{1}负责人": "Appoint an owner for {1}",

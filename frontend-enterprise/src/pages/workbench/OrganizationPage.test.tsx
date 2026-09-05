@@ -430,6 +430,69 @@ describe('OrganizationPage', () => {
       .toEqual(['member', 'ceo']);
   });
 
+  it('keeps an active department manager role read-only and omits it when saving other profile fields', async () => {
+    const currentManager: EmployeeRead = {
+      ...employee,
+      id: 'employee-current-manager',
+      user_id: 'user-current-manager',
+      username: 'current.manager',
+      display_name: '周经理',
+      job_title: '产品负责人',
+      business_role: 'manager',
+      daily_cost: 1500,
+      manager_user_id: null,
+      assistant_agent_id: null,
+    };
+    const managedDepartment: DepartmentRead = {
+      ...department,
+      manager_user_id: currentManager.user_id,
+    };
+    vi.mocked(workbenchApi.listDepartments).mockResolvedValueOnce([managedDepartment]);
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([currentManager]);
+    vi.mocked(workbenchApi.updateEmployee).mockResolvedValueOnce({
+      ...currentManager,
+      job_title: '产品总监',
+      daily_cost: 1800,
+      assistant_agent_id: assistant.id,
+    });
+    const user = userEvent.setup();
+    renderOrganization();
+    await screen.findByText('周经理');
+
+    await user.click(screen.getByRole('button', { name: '编辑周经理' }));
+    const editor = await screen.findByRole('dialog', { name: '编辑员工：周经理' });
+    const businessRole = within(editor).getByLabelText('业务角色');
+    expect(businessRole).toHaveProperty('readOnly', true);
+    expect(businessRole).toHaveProperty('value', '部门负责人');
+
+    const title = within(editor).getByLabelText('岗位');
+    await user.clear(title);
+    await user.type(title, '产品总监');
+    const dailyCost = within(editor).getByLabelText('日成本');
+    await user.clear(dailyCost);
+    await user.type(dailyCost, '1800');
+    await user.selectOptions(within(editor).getByLabelText('AI 助理关联'), assistant.id);
+    await user.click(within(editor).getByRole('button', { name: '保存员工档案' }));
+
+    expect(await screen.findByText('产品总监')).toBeTruthy();
+    expect(screen.getByText('AI 助理：产品研究助理')).toBeTruthy();
+    expect(workbenchApi.updateEmployee).toHaveBeenCalledWith(currentManager.id, {
+      tenant_id: admin.tenant_id,
+      employee_no: currentManager.employee_no,
+      department_id: managedDepartment.id,
+      job_title: '产品总监',
+      level: currentManager.level,
+      skills: currentManager.skills,
+      capacity_percent: currentManager.capacity_percent,
+      daily_cost: 1800,
+      manager_user_id: null,
+      assistant_agent_id: assistant.id,
+      status: 'active',
+    });
+    const updatePayload = vi.mocked(workbenchApi.updateEmployee).mock.calls[0]?.[1];
+    expect(updatePayload).not.toHaveProperty('business_role');
+  });
+
   it('edits a real employee and binds an existing AI assistant as a capability', async () => {
     const user = userEvent.setup();
     renderOrganization();
