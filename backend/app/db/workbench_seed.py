@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import os
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -12,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import SessionTransaction
 from sqlmodel import Session, select
 
+from app.db.database_path import sqlite_database_path
 from app.db.models import (
     Department,
     EmployeeProfile,
@@ -26,6 +29,12 @@ TENANT_ID = "tenant_demo"
 PROJECT_ID = "project_quantxy_delivery_example"
 _SEED_LOCK = Lock()
 _SESSION_LOCK_KEY = "quantxy_workbench_seed_lock"
+_PREEXISTING_TRANSACTION_ERROR = (
+    "QuantXY seed transaction lock must be acquired before the Session starts a transaction"
+)
+_WINDOWS_LOCK_RETRY_SECONDS = 0.01
+_WINDOWS_LOCK_CONTENTION_ERRNOS = {errno.EACCES, errno.EAGAIN}
+_WINDOWS_LOCK_CONTENTION_WINERRORS = {32, 33}
 
 
 @dataclass(frozen=True)
@@ -37,12 +46,10 @@ def _sqlite_seed_lock_path(session: Session) -> Path | None:
     bind = session.get_bind()
     if bind.dialect.name != "sqlite":
         return None
-    database = bind.url.database
-    if not database or database == ":memory:":
+    engine = getattr(bind, "engine", bind)
+    database_path = sqlite_database_path(engine.url.render_as_string(hide_password=False))
+    if database_path is None:
         return None
-    database_path = Path(database).expanduser()
-    if not database_path.is_absolute():
-        database_path = database_path.resolve()
     return database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
 
 
@@ -51,11 +58,17 @@ def _lock_file(handle: BinaryIO) -> None:
         import msvcrt
 
         handle.seek(0)
-        if handle.read(1) == b"":
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError as exc:
+                if (
+                    exc.errno not in _WINDOWS_LOCK_CONTENTION_ERRNOS
+                    and getattr(exc, "winerror", None) not in _WINDOWS_LOCK_CONTENTION_WINERRORS
+                ):
+                    raise
+                time.sleep(_WINDOWS_LOCK_RETRY_SECONDS)
         return
 
     import fcntl
@@ -90,6 +103,12 @@ def _open_file_lock(lock_path: Path) -> BinaryIO:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+b")
     try:
+        if os.name == "nt" and os.fstat(handle.fileno()).st_size == 0:
+            # msvcrt cannot lock a byte beyond EOF. Appending avoids reading a
+            # byte that another process may already have locked.
+            handle.seek(0, os.SEEK_END)
+            handle.write(b"0")
+            handle.flush()
         _lock_file(handle)
     except BaseException:
         handle.close()
@@ -120,6 +139,8 @@ def acquire_quantxy_seed_transaction_lock(session: Session) -> None:
     """
     if session.info.get(_SESSION_LOCK_KEY):
         return
+    if session.in_transaction():
+        raise RuntimeError(_PREEXISTING_TRANSACTION_ERROR)
     _SEED_LOCK.acquire()
     file_handle: BinaryIO | None = None
     try:
@@ -211,6 +232,15 @@ def _seed_users(session: Session, tenant_id: str) -> dict[str, User]:
 def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None:
     if tenant_id != TENANT_ID:
         raise ValueError("QuantXY workbench seed only supports tenant_demo")
+
+    if session.in_transaction() and not session.info.get(_SESSION_LOCK_KEY):
+        # An already-populated workbench is a read-only no-op. An empty one
+        # must not wait for the seed file lock while its caller may already
+        # hold a database write lock in the opposite order.
+        with session.no_autoflush:
+            if _has_workbench_organization(session, tenant_id):
+                return
+        raise RuntimeError(_PREEXISTING_TRANSACTION_ERROR)
 
     acquire_quantxy_seed_transaction_lock(session)
     # Keep caller-owned pending writes outside the seed savepoint and its conflict recovery.
