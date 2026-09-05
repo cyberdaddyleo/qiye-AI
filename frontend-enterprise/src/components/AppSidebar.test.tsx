@@ -71,15 +71,18 @@ function renderSidebar(props: {
   selectedAgentId: string;
   onSelectAgent?: (value: string) => void;
   scopeTeams?: TeamRead[];
+  selected?: string;
+  isAdmin?: boolean;
+  onNavigate?: (route: string) => void;
 }) {
   return render(
     <I18nProvider>
       <TooltipProvider>
         <SidebarProvider>
           <AppSidebar
-            selected="/enterprise/dashboard"
-            onNavigate={() => {}}
-            isAdmin={false}
+            selected={props.selected ?? '/enterprise/dashboard'}
+            onNavigate={props.onNavigate ?? (() => {})}
+            isAdmin={props.isAdmin ?? false}
             scopeAgents={[agent]}
             scopeTeams={props.scopeTeams ?? [team]}
             selectedAgentId={props.selectedAgentId}
@@ -91,6 +94,55 @@ function renderSidebar(props: {
     </I18nProvider>,
   );
 }
+
+describe('AppSidebar workbench navigation', () => {
+  it('shows the six enterprise operations before the AI capability links', () => {
+    const { container } = renderSidebar({
+      selectedAgentId: 'agent-1',
+      selected: '/enterprise/workbench',
+      isAdmin: true,
+    });
+
+    expect(screen.getByText('企业运营')).toBeTruthy();
+    expect(screen.getByText('AI 能力')).toBeTruthy();
+    expect(screen.getByText('接入与系统')).toBeTruthy();
+
+    const labels = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-sidebar="menu-button"]'),
+      (button) => button.textContent?.trim(),
+    );
+    expect(labels.slice(0, 6)).toEqual([
+      '企业工作台',
+      '项目中心',
+      'AI 调度中心',
+      '任务中心',
+      '员工工作台',
+      '组织与权限',
+    ]);
+    expect(labels.indexOf('AI 助理')).toBeGreaterThan(labels.indexOf('组织与权限'));
+    expect(labels).not.toContain('我的数字员工');
+    expect(labels).toEqual(expect.arrayContaining([
+      '知识库',
+      '技能',
+      'SOP',
+      '工具',
+      '渠道接入',
+      '账号管理',
+      '模型配置',
+      '运行设置',
+    ]));
+  });
+
+  it('keeps AI assistant navigation on the existing agents route', async () => {
+    const user = userEvent.setup();
+    const onNavigate = vi.fn();
+    renderSidebar({ selectedAgentId: 'agent-1', onNavigate });
+
+    await user.click(screen.getByRole('button', { name: 'AI 助理' }));
+
+    expect(onNavigate).toHaveBeenCalledWith('/enterprise/agents');
+  });
+});
 
 afterEach(() => {
   cleanup();
@@ -210,8 +262,8 @@ describe('AppSidebar chat variant group conversations', () => {
   it('renders employee sessions and team groups as different conversation types', () => {
     renderChatSidebar();
 
-    expect(screen.getAllByRole('button', { name: '数字员工广场' }).some(
-      (item) => item.getAttribute('aria-label') === '数字员工广场',
+    expect(screen.getAllByRole('button', { name: 'AI 助理广场' }).some(
+      (item) => item.getAttribute('aria-label') === 'AI 助理广场',
     )).toBe(true);
     expect(screen.getByLabelText('群聊')).toBeTruthy();
     const groupRow = screen.getByText('增长团队').closest('[role="button"]');

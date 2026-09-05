@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Optional
 from uuid import uuid4
 
-from sqlalchemy import JSON, Column, Index, Integer, UniqueConstraint
+from sqlalchemy import JSON, CheckConstraint, Column, Index, Integer, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -1598,4 +1598,159 @@ class TeamTaskBid(SQLModel, table=True):
     # TL 裁决后回写的分数与理由,未裁决前为 None
     score: Optional[float] = None
     score_rationale: Optional[str] = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class Department(SQLModel, table=True):
+    __tablename__ = "workbench_departments"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_workbench_department_tenant_name"),
+        Index("ix_workbench_departments_tenant_code", "tenant_id", "code"),
+    )
+
+    id: str = Field(default_factory=lambda: new_id("dept"), primary_key=True)
+    tenant_id: str = Field(index=True)
+    name: str
+    code: str = Field(index=True)
+    parent_id: Optional[str] = Field(default=None, index=True)
+    manager_user_id: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="active", index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class EmployeeProfile(SQLModel, table=True):
+    __tablename__ = "workbench_employee_profiles"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_workbench_employee_tenant_user"),
+        Index("ix_workbench_employee_tenant_department", "tenant_id", "department_id"),
+        CheckConstraint(
+            "capacity_percent >= 0 AND capacity_percent <= 100",
+            name="ck_workbench_employee_capacity_percent",
+        ),
+    )
+
+    id: str = Field(default_factory=lambda: new_id("employee"), primary_key=True)
+    tenant_id: str = Field(index=True)
+    user_id: str = Field(index=True)
+    employee_no: Optional[str] = Field(default=None, index=True)
+    department_id: Optional[str] = Field(default=None, index=True)
+    job_title: Optional[str] = None
+    business_role: str = Field(default="member", index=True)
+    level: Optional[str] = None
+    skills_json: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    capacity_percent: int = Field(default=100, ge=0, le=100)
+    daily_cost: Optional[float] = None
+    manager_user_id: Optional[str] = Field(default=None, index=True)
+    assistant_agent_id: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="active", index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class WorkProject(SQLModel, table=True):
+    __tablename__ = "workbench_projects"
+    __table_args__ = (Index("ix_workbench_project_tenant_status", "tenant_id", "status"),)
+
+    id: str = Field(default_factory=lambda: new_id("project"), primary_key=True)
+    tenant_id: str = Field(index=True)
+    name: str
+    objective: str
+    description: Optional[str] = None
+    owner_user_id: Optional[str] = Field(default=None, index=True)
+    department_id: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="active", index=True)
+    health: str = Field(default="on_track", index=True)
+    start_date: Optional[date] = None
+    due_date: Optional[date] = None
+    budget: Optional[float] = None
+    version: int = 0
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class WorkPlan(SQLModel, table=True):
+    __tablename__ = "workbench_plans"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "dispatch_idempotency_key", name="uq_workbench_plan_dispatch_key"),
+        Index("ix_workbench_plan_tenant_project", "tenant_id", "project_id"),
+    )
+
+    id: str = Field(default_factory=lambda: new_id("plan"), primary_key=True)
+    tenant_id: str = Field(index=True)
+    project_id: str = Field(index=True)
+    created_by_user_id: str = Field(index=True)
+    goal: str
+    deadline: Optional[date] = None
+    budget: Optional[float] = None
+    constraints_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    status: str = Field(default="draft", index=True)
+    source: str = Field(default="model", index=True)
+    variants_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    selected_variant: Optional[str] = None
+    selected_variant_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    dispatch_overrides_json: list[dict[str, Any]] = Field(
+        default_factory=list, sa_column=Column(JSON)
+    )
+    dispatch_idempotency_key: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    dispatched_at: Optional[datetime] = None
+
+
+class WorkTask(SQLModel, table=True):
+    __tablename__ = "workbench_tasks"
+    __table_args__ = (
+        Index("ix_workbench_task_tenant_project_status", "tenant_id", "project_id", "status"),
+        Index("ix_workbench_task_tenant_assignee", "tenant_id", "assignee_user_id"),
+    )
+
+    id: str = Field(default_factory=lambda: new_id("task"), primary_key=True)
+    tenant_id: str = Field(index=True)
+    project_id: str = Field(index=True)
+    plan_id: Optional[str] = Field(default=None, index=True)
+    parent_task_id: Optional[str] = Field(default=None, index=True)
+    title: str
+    description: Optional[str] = None
+    required_role: Optional[str] = Field(default=None, index=True)
+    priority: str = Field(default="normal", index=True)
+    status: str = Field(default="backlog", index=True)
+    assignee_user_id: Optional[str] = Field(default=None, index=True)
+    reviewer_user_id: Optional[str] = Field(default=None, index=True)
+    start_date: Optional[date] = None
+    due_date: Optional[date] = None
+    estimate_days: Optional[float] = None
+    progress: int = 0
+    acceptance_criteria: Optional[str] = None
+    result_summary: Optional[str] = None
+    version: int = 0
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    completed_at: Optional[datetime] = None
+
+
+class WorkTaskDependency(SQLModel, table=True):
+    __tablename__ = "workbench_task_dependencies"
+    __table_args__ = (
+        UniqueConstraint("task_id", "depends_on_task_id", name="uq_workbench_task_dependency"),
+    )
+
+    id: str = Field(default_factory=lambda: new_id("taskdep"), primary_key=True)
+    tenant_id: str = Field(index=True)
+    task_id: str = Field(index=True)
+    depends_on_task_id: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class WorkTaskEvent(SQLModel, table=True):
+    __tablename__ = "workbench_task_events"
+    __table_args__ = (Index("ix_workbench_task_event_tenant_task", "tenant_id", "task_id"),)
+
+    id: str = Field(default_factory=lambda: new_id("taskevent"), primary_key=True)
+    tenant_id: str = Field(index=True)
+    task_id: str = Field(index=True)
+    actor_user_id: Optional[str] = Field(default=None, index=True)
+    actor_type: str = Field(index=True)
+    event_type: str = Field(index=True)
+    payload_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)

@@ -134,6 +134,7 @@ def _migrate_sqlite_skill_schema() -> None:
         _migrate_channel_bind_code_constraints(conn, tables)
         _migrate_capability_scope_schema(conn, inspector, tables)
         _migrate_harness_v2_schema(conn, inspector, tables)
+        _migrate_workbench_schema(conn, inspector, tables)
 
         if "api_jobs" in tables:
             job_columns = {column["name"] for column in inspector.get_columns("api_jobs")}
@@ -1932,6 +1933,34 @@ def _migrate_capability_scope_schema(conn, inspector, tables: set[str]) -> None:
                 f"ON {table_name}(capability_scope)"
             )
         )
+
+
+def _migrate_workbench_schema(conn, inspector, tables: set[str]) -> None:
+    if "workbench_projects" not in tables:
+        return
+    columns = {column["name"] for column in inspector.get_columns("workbench_projects")}
+    if "version" not in columns:
+        conn.execute(
+            text(
+                "ALTER TABLE workbench_projects "
+                "ADD COLUMN version INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+    if "workbench_plans" in tables:
+        plan_columns = {
+            column["name"] for column in inspector.get_columns("workbench_plans")
+        }
+        if "selected_variant_json" not in plan_columns:
+            conn.execute(
+                text("ALTER TABLE workbench_plans ADD COLUMN selected_variant_json JSON")
+            )
+        if "dispatch_overrides_json" not in plan_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE workbench_plans ADD COLUMN dispatch_overrides_json "
+                    "JSON NOT NULL DEFAULT '[]'"
+                )
+            )
 
 
 def _migrate_harness_v2_schema(conn, inspector, tables: set[str]) -> None:

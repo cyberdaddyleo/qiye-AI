@@ -1,6 +1,12 @@
 export enum EnterpriseRoute {
   Workspace = '/workspace',
   Chat = '/workspace/chat',
+  Workbench = '/enterprise/workbench',
+  Projects = '/enterprise/projects',
+  Planning = '/enterprise/planning',
+  Tasks = '/enterprise/tasks',
+  MyWork = '/enterprise/my-work',
+  Organization = '/enterprise/organization',
   Platform = '/enterprise/platform',
   Gallery = '/workspace/gallery',
   Agents = '/enterprise/agents',

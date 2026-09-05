@@ -30,10 +30,6 @@ import type { AgentProfileRead, ChatSession, TeamRead } from '../types';
 import IconPlatform from '../assets/icons/nav-platform.svg?react';
 import IconAgents from '../assets/icons/nav-agents.svg?react';
 import IconTeams from '../assets/icons/nav-teams.svg?react';
-import IconFile from '../assets/icons/profile-file.svg?react';
-import IconAlarm from '../assets/icons/profile-alarm.svg?react';
-import IconHistory from '../assets/icons/profile-history.svg?react';
-import IconCalendar from '../assets/icons/profile-calendar.svg?react';
 import IconFolder from '../assets/icons/cap-folder.svg?react';
 import IconMagicWand from '../assets/icons/cap-magicwand.svg?react';
 import IconClipboard from '../assets/icons/cap-clipboard.svg?react';
@@ -61,21 +57,19 @@ type NavItem = {
   Icon: IconComponent;
 };
 
-const PRIMARY_NAV: NavItem[] = [
-  { route: EnterpriseRoute.Platform, label: '开放广场平台', Icon: IconPlatform },
-  { route: EnterpriseRoute.Agents, label: '我的数字员工', Icon: IconAgents },
-  { route: EnterpriseRoute.Teams, label: '我的团队', Icon: IconTeams },
-  { route: EnterpriseRoute.Channels, label: '渠道接入', Icon: IconGlobe },
-];
-
-const PROFILE_NAV: NavItem[] = [
-  { route: EnterpriseRoute.Dashboard, label: '员工档案', Icon: IconFile },
-  { route: EnterpriseRoute.ScheduledTasks, label: '定时任务', Icon: IconAlarm },
-  { route: EnterpriseRoute.Memories, label: '记忆', Icon: IconHistory },
-  { route: EnterpriseRoute.Feedback, label: '对话日志', Icon: IconCalendar },
+const OPERATIONS_NAV: NavItem[] = [
+  { route: EnterpriseRoute.Workbench, label: '企业工作台', Icon: IconViewMasonry },
+  { route: EnterpriseRoute.Projects, label: '项目中心', Icon: IconFolder },
+  { route: EnterpriseRoute.Planning, label: 'AI 调度中心', Icon: IconMagicWand },
+  { route: EnterpriseRoute.Tasks, label: '任务中心', Icon: IconClipboard },
+  { route: EnterpriseRoute.MyWork, label: '员工工作台', Icon: IconBriefcase },
+  { route: EnterpriseRoute.Organization, label: '组织与权限', Icon: IconAccounts },
 ];
 
 const CAPABILITY_NAV: NavItem[] = [
+  { route: EnterpriseRoute.Platform, label: '开放广场平台', Icon: IconPlatform },
+  { route: EnterpriseRoute.Agents, label: 'AI 助理', Icon: IconAgents },
+  { route: EnterpriseRoute.Teams, label: '我的团队', Icon: IconTeams },
   { route: EnterpriseRoute.Knowledge, label: '知识库', Icon: IconFolder },
   { route: EnterpriseRoute.GeneralSkills, label: '技能', Icon: IconMagicWand },
   { route: EnterpriseRoute.Skills, label: 'SOP', Icon: IconClipboard },
@@ -83,13 +77,14 @@ const CAPABILITY_NAV: NavItem[] = [
 ];
 
 const SYSTEM_NAV: NavItem[] = [
+  { route: EnterpriseRoute.Channels, label: '渠道接入', Icon: IconGlobe },
   { route: EnterpriseRoute.Accounts, label: '账号管理', Icon: IconAccounts },
   { route: EnterpriseRoute.Models, label: '模型配置', Icon: IconModels },
   { route: EnterpriseRoute.RuntimeSettings, label: '运行设置', Icon: IconSettings },
 ];
 
-function primaryNavItems(isAdmin: boolean): NavItem[] {
-  return isAdmin ? [...PRIMARY_NAV, ...SYSTEM_NAV] : PRIMARY_NAV;
+function systemNavItems(isAdmin: boolean): NavItem[] {
+  return isAdmin ? SYSTEM_NAV : SYSTEM_NAV.slice(0, 1);
 }
 
 export type AppSidebarManagementProps = {
@@ -126,7 +121,7 @@ export type AppSidebarChatProps = {
   onOpenSession: (id: string) => void;
   onNewConversation?: () => void;
   onOpenGallery: () => void;
-  /** Highlights the 数字员工广场 entry as the active menu (chat gallery route). */
+  /** Highlights the AI 助理广场 entry as the active menu (chat gallery route). */
   galleryActive?: boolean;
   handoffCount?: number;
   onOpenHandoffs?: () => void;
@@ -181,10 +176,12 @@ function CardNavButton({
   item,
   selected,
   onNavigate,
+  attention,
 }: {
   item: NavItem;
   selected: string;
   onNavigate: (route: string) => void;
+  attention?: boolean;
 }) {
   return (
     <SidebarMenuItem>
@@ -197,11 +194,15 @@ function CardNavButton({
           'h-[36px] gap-[8px] rounded-[12px] px-[12px] py-[4px] text-[12px] text-sidebar-foreground',
           'hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
           'data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground data-active:font-normal',
+          attention && selected !== item.route && 'bg-[#fff7e8] text-[#8a4b00] ring-1 ring-[#ffd58a]',
           'group-data-[collapsible=icon]:px-0!',
         )}
       >
         <item.Icon className="size-[14px]!" />
         <span>{item.label}</span>
+        {attention && (
+          <span className="ml-auto size-[6px] rounded-full bg-[#f59e0b] group-data-[collapsible=icon]:hidden" />
+        )}
       </SidebarMenuButton>
     </SidebarMenuItem>
   );
@@ -512,7 +513,7 @@ function CollapsedSidebar({
         ? '未选择'
         : employeeDisplayNameWithCreator(sidebarAgent)
       : '未选择';
-  const primaryItems = primaryNavItems(isAdmin);
+  const systemItems = systemNavItems(isAdmin);
 
   return (
     <div className="flex h-full w-(--sidebar-width-icon) shrink-0 flex-col items-center gap-[32px] px-[16px] pt-[42px] pb-[10px]">
@@ -538,7 +539,7 @@ function CollapsedSidebar({
       </div>
 
       <div className="flex w-full flex-col items-center gap-[12px]">
-        {primaryItems.map((item) => (
+        {OPERATIONS_NAV.map((item) => (
           <CollapsedNavButton
             key={item.route}
             item={item}
@@ -546,7 +547,6 @@ function CollapsedSidebar({
             onNavigate={onNavigate}
             radius={10}
             iconSize={16}
-            attention={modelSetupAttention && item.route === EnterpriseRoute.Models}
           />
         ))}
         <div className="h-px w-full bg-sidebar-border" />
@@ -566,8 +566,8 @@ function CollapsedSidebar({
           <div className="h-px w-[28px] bg-sidebar-border" />
 
           <div className="flex flex-col items-center gap-[4px]">
-            <CollapsedGroupLabel>资料</CollapsedGroupLabel>
-            {PROFILE_NAV.map((item) => (
+            <CollapsedGroupLabel>AI 能力</CollapsedGroupLabel>
+            {CAPABILITY_NAV.map((item) => (
               <CollapsedNavButton
                 key={item.route}
                 item={item}
@@ -578,8 +578,8 @@ function CollapsedSidebar({
               />
             ))}
 
-            <CollapsedGroupLabel>能力</CollapsedGroupLabel>
-            {CAPABILITY_NAV.map((item) => (
+            <CollapsedGroupLabel>接入与系统</CollapsedGroupLabel>
+            {systemItems.map((item) => (
               <CollapsedNavButton
                 key={item.route}
                 item={item}
@@ -587,6 +587,7 @@ function CollapsedSidebar({
                 onNavigate={onNavigate}
                 radius={10}
                 iconSize={14}
+                attention={modelSetupAttention && item.route === EnterpriseRoute.Models}
               />
             ))}
           </div>
@@ -628,7 +629,7 @@ function ManagementSidebar({
 }: AppSidebarManagementProps) {
   const { toggleSidebar, state } = useSidebar();
   const brandCollapsed = useMemo(() => state === 'collapsed', [state]);
-  const primaryItems = useMemo(() => primaryNavItems(isAdmin), [isAdmin]);
+  const systemItems = useMemo(() => systemNavItems(isAdmin), [isAdmin]);
 
   if (brandCollapsed) {
     return (
@@ -672,14 +673,14 @@ function ManagementSidebar({
         </div>
 
         <div className="flex flex-col gap-[18px]">
+          <GroupLabel>企业运营</GroupLabel>
           <SidebarMenu className="gap-[10px]">
-            {primaryItems.map((item) => (
+            {OPERATIONS_NAV.map((item) => (
               <PrimaryNavButton
                 key={item.route}
                 item={item}
                 selected={selected}
                 onNavigate={onNavigate}
-                attention={modelSetupAttention && item.route === EnterpriseRoute.Models}
               />
             ))}
           </SidebarMenu>
@@ -704,17 +705,23 @@ function ManagementSidebar({
           <div className="mx-[8px] h-px bg-sidebar-border group-data-[collapsible=icon]:hidden" />
 
           <div className="flex flex-col gap-[2px] px-[10px] group-data-[collapsible=icon]:px-0">
-            <GroupLabel>基本资料</GroupLabel>
+            <GroupLabel>AI 能力</GroupLabel>
             <SidebarMenu className="gap-[2px]">
-              {PROFILE_NAV.map((item) => (
+              {CAPABILITY_NAV.map((item) => (
                 <CardNavButton key={item.route} item={item} selected={selected} onNavigate={onNavigate} />
               ))}
             </SidebarMenu>
 
-            <GroupLabel>员工能力</GroupLabel>
+            <GroupLabel>接入与系统</GroupLabel>
             <SidebarMenu className="gap-[2px]">
-              {CAPABILITY_NAV.map((item) => (
-                <CardNavButton key={item.route} item={item} selected={selected} onNavigate={onNavigate} />
+              {systemItems.map((item) => (
+                <CardNavButton
+                  key={item.route}
+                  item={item}
+                  selected={selected}
+                  onNavigate={onNavigate}
+                  attention={modelSetupAttention && item.route === EnterpriseRoute.Models}
+                />
               ))}
             </SidebarMenu>
           </div>
@@ -1120,7 +1127,7 @@ function CollapsedChatSidebar({
   return (
     <div className="flex h-full w-(--sidebar-width-icon) shrink-0 flex-col items-center gap-[32px] px-[20px] pt-[42px] pb-[10px]">
       <div className="flex w-full flex-col items-center gap-[10px]">
-        <button type="button" title="数字员工广场" aria-label="数字员工广场" onClick={onOpenGallery} className="flex items-center justify-center p-[10px]">
+        <button type="button" title="AI 助理广场" aria-label="AI 助理广场" onClick={onOpenGallery} className="flex items-center justify-center p-[10px]">
           <BrandLogo markOnly />
         </button>
         <Tooltip>
@@ -1146,7 +1153,7 @@ function CollapsedChatSidebar({
             <button
               type="button"
               onClick={onOpenGallery}
-              aria-label="数字员工广场"
+              aria-label="AI 助理广场"
               aria-current={galleryActive ? 'page' : undefined}
               className={cn(
                 'flex h-[32px] w-full items-center justify-center rounded-[8px] transition-colors',
@@ -1159,7 +1166,7 @@ function CollapsedChatSidebar({
             </button>
           </TooltipTrigger>
           <TooltipContent side="right" align="center">
-            数字员工广场
+            AI 助理广场
           </TooltipContent>
         </Tooltip>
 
@@ -1321,7 +1328,7 @@ function ChatSidebarVariant({
       <div className="flex h-full w-(--sidebar-width) shrink-0 flex-col">
         <SidebarHeader className="gap-[24px] px-[20px] pt-[42px]">
           <div className="flex items-center justify-between">
-            <button type="button" title="数字员工广场" aria-label="数字员工广场" onClick={onOpenGallery}>
+            <button type="button" title="AI 助理广场" aria-label="AI 助理广场" onClick={onOpenGallery}>
               <BrandLogo />
             </button>
             <button
@@ -1348,7 +1355,7 @@ function ChatSidebarVariant({
               )}
             >
               <IconGlobe className="size-[16px]! shrink-0" />
-              <span className="truncate">数字员工广场</span>
+              <span className="truncate">AI 助理广场</span>
             </button>
             <ChatHandoffButton count={handoffCount} onOpen={onOpenHandoffs} />
             <div className="h-px w-full bg-sidebar-border" />

@@ -70,6 +70,12 @@ import ToolsPage, {
   ToolNewPage,
   ToolTestPage,
 } from "./pages/ToolsPage";
+import WorkbenchDashboardPage from "./pages/workbench/WorkbenchDashboardPage";
+import ProjectsPage from "./pages/workbench/ProjectsPage";
+import PlanningPage from "./pages/workbench/PlanningPage";
+import TasksPage from "./pages/workbench/TasksPage";
+import MyWorkPage from "./pages/workbench/MyWorkPage";
+import OrganizationPage from "./pages/workbench/OrganizationPage";
 import { useIsMobile } from "./hooks/use-mobile";
 import {
   Dialog,
@@ -107,7 +113,21 @@ import { useI18n } from "./i18n";
 
 const ENTERPRISE_SIDEBAR_STORAGE_KEY = "ultrarag_enterprise_sidebar_expanded";
 const MODEL_CONFIGS_UPDATED_EVENT = "ultrarag-enterprise-model-configs-updated";
+const WORKBENCH_ROUTES = [
+  EnterpriseRoute.Workbench,
+  EnterpriseRoute.Projects,
+  EnterpriseRoute.Planning,
+  EnterpriseRoute.Tasks,
+  EnterpriseRoute.MyWork,
+  EnterpriseRoute.Organization,
+] as const;
 type AgentCreateMode = "copy" | "blank";
+
+function workbenchRouteForPath(pathname: string): EnterpriseRoute | undefined {
+  return WORKBENCH_ROUTES.find(
+    (route) => pathname === route || pathname.startsWith(`${route}/`),
+  );
+}
 
 type AgentCreateFormState = {
   name: string;
@@ -156,10 +176,13 @@ function Shell({
   const isAdmin = isEnterpriseAdmin(auth.user);
   const accountRoleLabel = isAdmin ? "管理员" : "";
   const isDistillRoute = location.pathname === "/enterprise/skills/distill";
+  const selectedWorkbenchRoute = workbenchRouteForPath(location.pathname);
   const selected =
     location.pathname === "/enterprise"
-      ? "/enterprise/dashboard"
-      : location.pathname.startsWith("/enterprise/platform")
+      ? EnterpriseRoute.Workbench
+      : selectedWorkbenchRoute
+        ? selectedWorkbenchRoute
+        : location.pathname.startsWith("/enterprise/platform")
         ? "/enterprise/platform"
         : location.pathname.startsWith("/enterprise/knowledge")
           ? "/enterprise/knowledge"
@@ -568,7 +591,62 @@ function Shell({
             <Routes>
               <Route
                 path="/enterprise"
-                element={<Navigate to="/enterprise/dashboard" replace />}
+                element={<Navigate to={EnterpriseRoute.Workbench} replace />}
+              />
+              <Route
+                path={`${EnterpriseRoute.Workbench}/*`}
+                element={
+                  <WorkbenchDashboardPage
+                    currentUser={auth.user}
+                    onLogout={onLogout}
+                  />
+                }
+              />
+              <Route
+                path={`${EnterpriseRoute.Projects}/*`}
+                element={
+                  <ProjectsPage
+                    currentUser={auth.user}
+                    onLogout={onLogout}
+                  />
+                }
+              />
+              <Route
+                path={`${EnterpriseRoute.Planning}/*`}
+                element={
+                  <PlanningPage
+                    currentUser={auth.user}
+                    onLogout={onLogout}
+                  />
+                }
+              />
+              <Route
+                path={`${EnterpriseRoute.Tasks}/*`}
+                element={
+                  <TasksPage
+                    currentUser={auth.user}
+                    onLogout={onLogout}
+                  />
+                }
+              />
+              <Route
+                path={`${EnterpriseRoute.MyWork}/*`}
+                element={
+                  <MyWorkPage
+                    currentUser={auth.user}
+                    onLogout={onLogout}
+                  />
+                }
+              />
+              <Route
+                path={`${EnterpriseRoute.Organization}/*`}
+                element={
+                  <OrganizationPage
+                    currentUser={auth.user}
+                    onLogout={onLogout}
+                    assistants={agents}
+                  />
+                }
               />
               <Route
                 path="/enterprise/platform"
@@ -821,7 +899,7 @@ function Shell({
               />
               <Route
                 path="*"
-                element={<Navigate to="/enterprise/dashboard" replace />}
+                element={<Navigate to={EnterpriseRoute.Workbench} replace />}
               />
             </Routes>
           )}

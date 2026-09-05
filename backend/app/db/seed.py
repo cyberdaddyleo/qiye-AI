@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 from sqlmodel import Session, select
@@ -20,10 +21,14 @@ from app.db.models import (
     User,
     utc_now,
 )
-from app.security.encryption import encrypt_secret
-from app.security.auth import hash_password
 from app.db.staffdeck_seed import seed_staffdeck_admin_gallery
-
+from app.db.workbench_seed import (
+    DEFAULT_PERSONA_PROMPT,
+    acquire_quantxy_seed_transaction_lock,
+    seed_quantxy_workbench,
+)
+from app.security.auth import hash_password
+from app.security.encryption import encrypt_secret
 
 ADAPTIVE_FLOW_RULE = (
     "步骤是可自适应推进的目标，不是固定问答脚本；已由当前用户消息、历史信息或路由意图满足的内容"
@@ -850,13 +855,6 @@ DEMO_TOOLS = (
     ORDER_ADD_TOOL,
     PRODUCT_PRICE_QUERY_TOOL,
 )
-DEFAULT_PERSONA_PROMPT = (
-    "你是面壁智能的智能客服，语气专业、清晰、友好。"
-    "你需要先理解用户诉求，再基于已配置的技能和工具帮助用户完成业务办理。"
-    "不要暴露内部路由、技能 ID、步骤 ID 或工具实现细节。"
-)
-
-
 def _seed_mcp_servers(session: Session) -> None:
     """落地 demo MCP server（工具集）及其已发现的子工具。"""
     for server_config in MCP_SERVERS:
@@ -915,6 +913,7 @@ def _seed_mcp_servers(session: Session) -> None:
 
 def seed_demo_data(session: Session) -> None:
     settings = get_settings()
+    acquire_quantxy_seed_transaction_lock(session)
     if not session.get(Tenant, "tenant_demo"):
         session.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
 
@@ -955,6 +954,7 @@ def seed_demo_data(session: Session) -> None:
         admin_user.updated_at = utc_now()
         session.add(admin_user)
 
+    seed_quantxy_workbench(session)
     _ensure_seed_agents(session)
 
     for raw_content in (
@@ -1033,7 +1033,7 @@ def seed_demo_data(session: Session) -> None:
     default_model = session.exec(
         select(ModelConfig).where(
             ModelConfig.tenant_id == "tenant_demo",
-            ModelConfig.is_default == True,  # noqa: E712
+            ModelConfig.is_default == True,
         )
     ).first()
     if not default_model and settings.demo_model_api_key:
@@ -1392,7 +1392,7 @@ def _skill_content_graph(content: dict) -> dict:
                     "priority": index,
                     "label": "",
                 }
-                for index, (source, target) in enumerate(zip(node_ids, node_ids[1:]))
+                for index, (source, target) in enumerate(pairwise(node_ids))
             ],
         )
     else:

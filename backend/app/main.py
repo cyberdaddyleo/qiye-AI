@@ -26,6 +26,7 @@ from app.api import (
     tools,
     traces,
     ui_config,
+    workbench,
 )
 from app.async_jobs import shutdown_async_jobs, start_async_jobs
 from app.a2a import recover_codex_a2a_tasks, router as a2a_router, stop_codex_a2a_tasks
@@ -136,6 +137,7 @@ app.include_router(ui_config.enterprise_router)
 app.include_router(channels.router)
 app.include_router(teams.router)
 app.include_router(teams.threads_router)
+app.include_router(workbench.router)
 app.include_router(tools.router)
 app.include_router(tools.mcp_router)
 app.include_router(sessions.router)

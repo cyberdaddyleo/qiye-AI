@@ -1704,7 +1704,7 @@ export function canRateMessage(item: ChatMessage): boolean {
 }
 
 export function stripTrailingCitationSummary(content: string): string {
-  const citationHeading = '(?:参考来源|参考资料|引用来源|资料来源)';
+  const citationHeading = /(?:参考来源|参考资料|引用来源|资料来源)/u.source;
   const labelFooter = new RegExp(
     `(?:^|\\n)\\s*${citationHeading}\\s*[:：]\\s*(?:\\[\\d+\\]\\s*)+\\s*$`,
     'u',

@@ -48,6 +48,8 @@ export type AppHeaderProps = {
   title?: ReactNode;
   /** Convenience field for the left slot's description line. Ignored when `left` is set. */
   description?: ReactNode;
+  /** Page-specific actions rendered before the default account menu. */
+  actions?: ReactNode;
   /**
    * Custom content for the right side of the header. When provided it fully
    * replaces the default user avatar / logout dropdown (used e.g. on the
@@ -72,6 +74,7 @@ export default function AppHeader({
   left,
   title,
   description,
+  actions,
   right,
   onLogout,
   userName,
@@ -228,6 +231,7 @@ export default function AppHeader({
       <div className="min-w-0 flex-1">{leftContent}</div>
       <div className="flex h-[32px] shrink-0 items-center gap-[8px]">
         <LanguageSwitcher />
+        {actions}
         {right !== undefined ? right : (
           <DropdownMenu>
             <DropdownMenuTrigger
