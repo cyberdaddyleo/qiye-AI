@@ -18,6 +18,7 @@ import type {
   TaskReviewRequest,
   TaskSubmitRequest,
   TaskUpdateRequest,
+  WorkbenchAccessRead,
 } from '@/types/workbench';
 
 const WORKBENCH_API = '/api/enterprise/workbench';
@@ -55,6 +56,10 @@ async function directRequest<T>(path: string, options: RequestInit): Promise<T> 
 
 export function getDashboard(tenantId = TENANT_ID): Promise<DashboardRead> {
   return api.get(queryPath(`${WORKBENCH_API}/dashboard`, { tenant_id: tenantId }));
+}
+
+export function getAccess(tenantId = TENANT_ID): Promise<WorkbenchAccessRead> {
+  return api.get(queryPath(`${WORKBENCH_API}/access`, { tenant_id: tenantId }));
 }
 
 export function listProjects(tenantId = TENANT_ID): Promise<ProjectRead[]> {
@@ -135,6 +140,7 @@ export function importEmployees(file: File, tenantId = TENANT_ID): Promise<Emplo
 }
 
 export const workbenchApi = {
+  getAccess,
   getDashboard,
   listProjects,
   createProject,

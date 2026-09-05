@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 BusinessRole = Literal["admin", "ceo", "manager", "member"]
+DirectoryScope = Literal["all", "department", "self"]
 DepartmentStatus = Literal["active", "archived"]
 EmployeeStatus = Literal["active", "inactive"]
 ProjectStatus = Literal["active", "on_hold", "completed", "archived"]
@@ -16,6 +17,14 @@ PlanSource = Literal["model", "fallback"]
 TaskStatus = Literal["backlog", "blocked", "in_progress", "review", "done", "canceled"]
 TaskPriority = Literal["low", "normal", "high", "urgent"]
 ReviewVerdict = Literal["approve", "rework"]
+
+
+class WorkbenchAccessRead(BaseModel):
+    tenant_id: str
+    user_id: str
+    business_role: BusinessRole
+    directory_scope: DirectoryScope
+    can_create_project: bool
 
 
 class DepartmentRead(BaseModel):

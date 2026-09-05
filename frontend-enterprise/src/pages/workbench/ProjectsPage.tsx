@@ -21,7 +21,7 @@ import {
   DIALOG_FOOTER_CLASS,
   DIALOG_PRIMARY_BUTTON_CLASS,
 } from '@/lib/enterprise-ui';
-import type { DepartmentRead, EmployeeRead, ProjectRead } from '@/types/workbench';
+import type { DepartmentRead, ProjectRead, WorkbenchAccessRead } from '@/types/workbench';
 
 import WorkbenchLayout from './WorkbenchLayout';
 import { workbenchApi } from './workbenchApi';
@@ -56,7 +56,7 @@ type ProjectForm = {
 };
 
 type ProjectLoadFailure = {
-  source: 'projects' | 'departments' | 'employees';
+  source: 'access' | 'projects' | 'departments' | 'employees';
   reason: unknown;
 };
 
@@ -73,7 +73,7 @@ const EMPTY_FORM: ProjectForm = {
 export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProps) {
   const [projects, setProjects] = useState<ProjectRead[]>([]);
   const [departments, setDepartments] = useState<DepartmentRead[]>([]);
-  const [employees, setEmployees] = useState<EmployeeRead[]>([]);
+  const [access, setAccess] = useState<WorkbenchAccessRead | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadFailure, setLoadFailure] = useState<ProjectLoadFailure | null>(null);
   const [memberDirectoriesRestricted, setMemberDirectoriesRestricted] = useState(false);
@@ -88,12 +88,15 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
     setLoading(true);
     setLoadFailure(null);
     setMemberDirectoriesRestricted(false);
+    setAccess(null);
     void Promise.allSettled([
+      workbenchApi.getAccess(currentUser.tenant_id),
       workbenchApi.listProjects(currentUser.tenant_id),
       workbenchApi.listDepartments(currentUser.tenant_id),
       workbenchApi.listEmployees(currentUser.tenant_id),
-    ]).then(([projectResult, departmentResult, employeeResult]) => {
+    ]).then(([accessResult, projectResult, departmentResult, employeeResult]) => {
       if (!active) return;
+      setAccess(accessResult.status === 'fulfilled' ? accessResult.value : null);
       setProjects(
         projectResult.status === 'fulfilled' && Array.isArray(projectResult.value)
           ? projectResult.value
@@ -104,19 +107,17 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
           ? departmentResult.value
           : [],
       );
-      setEmployees(
-        employeeResult.status === 'fulfilled' && Array.isArray(employeeResult.value)
-          ? employeeResult.value
-          : [],
-      );
-      const expectedMemberDirectoryDenials = currentUser.role === 'member'
+      const expectedMemberDirectoryDenials = accessResult.status === 'fulfilled'
+        && accessResult.value.business_role === 'member'
         && departmentResult.status === 'rejected'
         && departmentResult.reason instanceof ApiError
         && departmentResult.reason.status === 403
         && employeeResult.status === 'rejected'
         && employeeResult.reason instanceof ApiError
         && employeeResult.reason.status === 403;
-      if (projectResult.status === 'rejected') {
+      if (accessResult.status === 'rejected') {
+        setLoadFailure({ source: 'access', reason: accessResult.reason });
+      } else if (projectResult.status === 'rejected') {
         setLoadFailure({ source: 'projects', reason: projectResult.reason });
       } else if (expectedMemberDirectoryDenials) {
         setMemberDirectoriesRestricted(true);
@@ -130,12 +131,9 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
     return () => {
       active = false;
     };
-  }, [currentUser.role, currentUser.tenant_id, refreshKey]);
+  }, [currentUser.id, currentUser.tenant_id, refreshKey]);
 
-  const self = employees.find((employee) => employee.user_id === currentUser.id);
-  const canCreate = currentUser.role === 'admin'
-    || self?.business_role === 'ceo'
-    || self?.business_role === 'manager';
+  const canCreate = access?.can_create_project === true;
   const activeDepartments = useMemo(
     () => departments.filter((department) => department.status === 'active'),
     [departments],
@@ -285,6 +283,15 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
 function ProjectError({ failure, onRetry }: { failure: ProjectLoadFailure; onRetry: () => void }) {
   const permissionDenied = failure.reason instanceof ApiError && failure.reason.status === 403;
   const presentation = {
+    access: permissionDenied
+      ? {
+          title: '无权读取项目权限信息',
+          detail: '当前账号无法确认项目访问与创建权限，请联系管理员或重试。',
+        }
+      : {
+          title: '项目权限信息加载失败',
+          detail: '未能确认项目访问与创建权限，为避免误判权限，请重试。',
+        },
     projects: permissionDenied
       ? {
           title: '无权查看项目中心',

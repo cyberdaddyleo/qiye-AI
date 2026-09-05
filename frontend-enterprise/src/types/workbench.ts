@@ -1,4 +1,5 @@
 export type BusinessRole = 'admin' | 'ceo' | 'manager' | 'member';
+export type WorkbenchDirectoryScope = 'all' | 'department' | 'self';
 export type DepartmentStatus = 'active' | 'archived';
 export type EmployeeStatus = 'active' | 'inactive';
 export type ProjectStatus = 'active' | 'on_hold' | 'completed' | 'archived';
@@ -10,6 +11,14 @@ export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent';
 export type TaskScope = 'mine' | 'department' | 'all';
 export type ReviewVerdict = 'approve' | 'rework';
 export type PlanVariantKey = 'A' | 'B' | 'C';
+
+export type WorkbenchAccessRead = {
+  tenant_id: string;
+  user_id: string;
+  business_role: BusinessRole;
+  directory_scope: WorkbenchDirectoryScope;
+  can_create_project: boolean;
+};
 
 export type DepartmentRead = {
   id: string;

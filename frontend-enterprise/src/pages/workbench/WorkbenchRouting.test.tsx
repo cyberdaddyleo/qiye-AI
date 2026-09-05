@@ -14,6 +14,7 @@ import {
   createDepartment,
   createProject,
   dispatchPlan,
+  getAccess,
   getDashboard,
   getTask,
   importEmployees,
@@ -221,6 +222,7 @@ describe('typed workbench API boundary', () => {
     ));
     vi.stubGlobal('fetch', fetchMock);
 
+    await getAccess('tenant_a');
     await getDashboard('tenant_a');
     await listProjects('tenant_a');
     await createProject({
@@ -271,6 +273,7 @@ describe('typed workbench API boundary', () => {
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
     }));
     expect(requests).toEqual([
+      { url: '/api/enterprise/workbench/access?tenant_id=tenant_a', method: 'GET', body: undefined },
       { url: '/api/enterprise/workbench/dashboard?tenant_id=tenant_a', method: 'GET', body: undefined },
       { url: '/api/enterprise/workbench/projects?tenant_id=tenant_a', method: 'GET', body: undefined },
       {

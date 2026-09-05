@@ -91,6 +91,47 @@ def test_workbench_access_permission_matrix() -> None:
         assert not can_view_employee(db, "tenant_a", rows["member"]["id"], other_profile)
 
 
+def test_access_api_reports_server_derived_roles_and_project_capabilities() -> None:
+    engine = _engine()
+    SQLModel.metadata.create_all(engine)
+    rows = _seed(engine)
+    client = _client(engine)
+    expected = {
+        "admin": ("admin", "all", True),
+        "ceo": ("ceo", "all", True),
+        "manager": ("manager", "department", True),
+        "member": ("member", "self", False),
+    }
+    try:
+        assert client.get(
+            "/api/enterprise/workbench/access", params={"tenant_id": "tenant_a"}
+        ).status_code == 401
+
+        for name, (business_role, directory_scope, can_create_project) in expected.items():
+            response = client.get(
+                "/api/enterprise/workbench/access",
+                params={"tenant_id": "tenant_a"},
+                headers=_headers(User(**rows[name], password_hash="hash")),
+            )
+            assert response.status_code == 200, response.text
+            assert response.json() == {
+                "tenant_id": "tenant_a",
+                "user_id": rows[name]["id"],
+                "business_role": business_role,
+                "directory_scope": directory_scope,
+                "can_create_project": can_create_project,
+            }
+
+        cross_tenant = client.get(
+            "/api/enterprise/workbench/access",
+            params={"tenant_id": "tenant_b"},
+            headers=_headers(User(**rows["member"], password_hash="hash")),
+        )
+        assert cross_tenant.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_organization_api_auth_scope_and_tenant_isolation() -> None:
     engine = _engine()
     SQLModel.metadata.create_all(engine)

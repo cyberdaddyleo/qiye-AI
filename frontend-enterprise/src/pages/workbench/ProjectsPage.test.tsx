@@ -8,7 +8,12 @@ import { MemoryRouter } from 'react-router-dom';
 import { ApiError } from '@/api/client';
 import type { EnterpriseAuthUser } from '@/auth';
 import { I18nProvider } from '@/i18n';
-import type { DepartmentRead, EmployeeRead, ProjectRead } from '@/types/workbench';
+import type {
+  DepartmentRead,
+  EmployeeRead,
+  ProjectRead,
+  WorkbenchAccessRead,
+} from '@/types/workbench';
 
 import ProjectsPage from './ProjectsPage';
 import { workbenchApi } from './workbenchApi';
@@ -19,6 +24,7 @@ vi.mock('./workbenchApi', async (importOriginal) => {
     ...original,
     workbenchApi: {
       ...original.workbenchApi,
+      getAccess: vi.fn(),
       listProjects: vi.fn(),
       listDepartments: vi.fn(),
       listEmployees: vi.fn(),
@@ -95,6 +101,35 @@ const managerEmployee: EmployeeRead = {
   business_role: 'manager',
 };
 
+const adminAccess: WorkbenchAccessRead = {
+  tenant_id: 'tenant-demo',
+  user_id: admin.id,
+  business_role: 'admin',
+  directory_scope: 'all',
+  can_create_project: true,
+};
+
+const ceoAccess: WorkbenchAccessRead = {
+  ...adminAccess,
+  user_id: ceoEmployee.user_id,
+  business_role: 'ceo',
+};
+
+const managerAccess: WorkbenchAccessRead = {
+  ...adminAccess,
+  user_id: managerEmployee.user_id,
+  business_role: 'manager',
+  directory_scope: 'department',
+};
+
+const memberAccess: WorkbenchAccessRead = {
+  ...adminAccess,
+  user_id: 'user-member',
+  business_role: 'member',
+  directory_scope: 'self',
+  can_create_project: false,
+};
+
 const project: ProjectRead = {
   id: 'project-launch',
   tenant_id: 'tenant-demo',
@@ -128,6 +163,7 @@ function renderProjects(user = admin) {
 
 describe('ProjectsPage', () => {
   beforeEach(() => {
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(adminAccess);
     vi.mocked(workbenchApi.listProjects).mockResolvedValue([project]);
     vi.mocked(workbenchApi.listDepartments).mockResolvedValue([department]);
     vi.mocked(workbenchApi.listEmployees).mockResolvedValue([employee]);
@@ -213,6 +249,7 @@ describe('ProjectsPage', () => {
   });
 
   it('shows member projects when both restricted directories return their expected 403', async () => {
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(memberAccess);
     vi.mocked(workbenchApi.listDepartments).mockRejectedValue(
       new ApiError(403, '{"detail":"Cannot view departments"}', 'Forbidden'),
     );
@@ -239,6 +276,7 @@ describe('ProjectsPage', () => {
       label: 'administrator employee directory',
       dependency: 'employees' as const,
       user: admin,
+      access: adminAccess,
       recoveredEmployees: [employee],
       errorTitle: '项目身份信息加载失败',
     },
@@ -252,6 +290,7 @@ describe('ProjectsPage', () => {
         display_name: ceoEmployee.display_name || ceoEmployee.username,
         role: 'member' as const,
       },
+      access: ceoAccess,
       recoveredEmployees: [ceoEmployee],
       errorTitle: '项目部门信息加载失败',
     },
@@ -265,15 +304,18 @@ describe('ProjectsPage', () => {
         display_name: managerEmployee.display_name || managerEmployee.username,
         role: 'member' as const,
       },
+      access: managerAccess,
       recoveredEmployees: [managerEmployee],
       errorTitle: '项目身份信息加载失败',
     },
   ])('shows a retryable error without mutations when $label fails', async ({
     dependency,
     user: authUser,
+    access,
     recoveredEmployees,
     errorTitle,
   }) => {
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(access);
     vi.mocked(workbenchApi.listEmployees).mockResolvedValue(recoveredEmployees);
     if (dependency === 'departments') {
       vi.mocked(workbenchApi.listDepartments).mockRejectedValueOnce(
@@ -297,6 +339,68 @@ describe('ProjectsPage', () => {
     await user.click(screen.getByRole('button', { name: '重试' }));
     expect(await screen.findByText('产品发布')).toBeTruthy();
     expect(screen.getByRole('button', { name: '新建项目' })).toBeTruthy();
+  });
+
+  it.each([
+    { label: 'administrator', user: admin, access: adminAccess },
+    {
+      label: 'CEO',
+      user: {
+        ...admin,
+        id: ceoEmployee.user_id,
+        username: ceoEmployee.username,
+        display_name: ceoEmployee.display_name || ceoEmployee.username,
+        role: 'member' as const,
+      },
+      access: ceoAccess,
+    },
+    {
+      label: 'manager',
+      user: {
+        ...admin,
+        id: managerEmployee.user_id,
+        username: managerEmployee.username,
+        display_name: managerEmployee.display_name || managerEmployee.username,
+        role: 'member' as const,
+      },
+      access: managerAccess,
+    },
+  ])('does not downgrade double directory 403 for $label', async ({ user, access }) => {
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(access);
+    vi.mocked(workbenchApi.listDepartments).mockRejectedValue(
+      new ApiError(403, '{"detail":"Cannot view departments"}', 'Forbidden'),
+    );
+    vi.mocked(workbenchApi.listEmployees).mockRejectedValue(
+      new ApiError(403, '{"detail":"Cannot list employees"}', 'Forbidden'),
+    );
+
+    renderProjects(user);
+
+    expect(await screen.findByRole('alert')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('无权读取项目部门信息'),
+    );
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+    expect(screen.queryByRole('article', { name: '产品发布' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '新建项目' })).toBeNull();
+  });
+
+  it('shows a retryable error without mutations when the access signal fails', async () => {
+    vi.mocked(workbenchApi.getAccess).mockRejectedValueOnce(new Error('access unavailable'));
+    const user = userEvent.setup();
+
+    renderProjects();
+
+    expect(await screen.findByRole('alert')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('项目权限信息加载失败'),
+    );
+    expect(screen.queryByRole('button', { name: '新建项目' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '重试' }));
+    expect(await screen.findByRole('article', { name: '产品发布' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '新建项目' })).toBeTruthy();
+    expect(workbenchApi.getAccess).toHaveBeenCalledTimes(2);
   });
 
   it('shows empty, retryable error, and permission-denied states without mutation controls', async () => {

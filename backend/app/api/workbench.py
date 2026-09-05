@@ -42,6 +42,7 @@ from app.workbench.schema import (
     PlanRead,
     TaskRead,
     TaskReviewRequest,
+    WorkbenchAccessRead,
     WorkTaskEventRead,
 )
 from app.workbench.service import (
@@ -349,6 +350,22 @@ def _ensure_global_role_assignment(access: WorkbenchAccess, business_role: str |
         raise HTTPException(
             status_code=403, detail="Only administrator or CEO can grant global employee roles"
         )
+
+
+@router.get("/access", response_model=WorkbenchAccessRead)
+def get_access_endpoint(
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+) -> WorkbenchAccessRead:
+    access = _access(db, tenant_id, current_user)
+    return WorkbenchAccessRead(
+        tenant_id=tenant_id,
+        user_id=current_user.id,
+        business_role=access.business_role,
+        directory_scope=access.directory_scope,
+        can_create_project=access.can_create_project,
+    )
 
 
 @router.post("/projects", status_code=201)
