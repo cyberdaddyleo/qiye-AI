@@ -150,7 +150,7 @@ const recentEvent: WorkTaskEventRead = {
   tenant_id: 'tenant-demo',
   actor_user_id: 'user-product',
   actor_type: 'human',
-  event_type: 'task_submitted',
+  event_type: 'result_submitted',
   payload: { result_summary: '已整理' },
   created_at: '2026-09-04T08:00:00Z',
 };
@@ -223,7 +223,13 @@ describe('WorkbenchDashboardPage', () => {
     expect(screen.getAllByText('林珊').length).toBeGreaterThan(0);
     expect(screen.getByText('负载 6 人日 · 3 项进行中')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '风险提醒' })).toBeTruthy();
-    expect(screen.getByText('林珊提交了任务')).toBeTruthy();
+    expect(screen.getByText('林珊提交了成果')).toBeTruthy();
+    const taskLinks = screen.getAllByRole('link')
+      .filter((link) => link.textContent?.includes('确认发布清单'));
+    expect(taskLinks.length).toBeGreaterThan(0);
+    for (const link of taskLinks) {
+      expect(link.getAttribute('href')).toBe(`/enterprise/tasks?task_id=${pendingTask.id}`);
+    }
   });
 
   it('shows only personal work metrics to a member and never exposes global cost', async () => {

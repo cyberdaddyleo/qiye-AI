@@ -5,13 +5,19 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { I18nProvider } from '@/i18n';
-import type { TaskUpdateRequest } from '@/types/workbench';
+import type {
+  EmployeeCreateRequest,
+  EmployeeUpdateRequest,
+  TaskSubmitRequest,
+  TaskUpdateRequest,
+} from '@/types/workbench';
 
 import App from '../../App';
 import { EnterpriseRoute } from '../../enums/routes';
 import {
   commentTask,
   createDepartment,
+  createEmployee,
   createProject,
   dispatchPlan,
   getAccess,
@@ -22,9 +28,11 @@ import {
   listEmployees,
   listProjects,
   listTasks,
+  listTenantUsers,
   previewPlan,
   reviewTask,
   submitTask,
+  updateDepartment,
   updateEmployee,
   updateTask,
 } from './workbenchApi';
@@ -245,6 +253,29 @@ describe('typed workbench API boundary', () => {
     expect(invalidUpdate.tenant_id).toBe('tenant_a');
   });
 
+  it('keeps account administration out of employee writes and requires deliverable references', () => {
+    const invalidCreate: EmployeeCreateRequest = {
+      tenant_id: 'tenant_a',
+      user_id: 'user-1',
+      // @ts-expect-error system administration belongs to the account layer.
+      business_role: 'admin',
+    };
+    const invalidUpdate: EmployeeUpdateRequest = {
+      tenant_id: 'tenant_a',
+      // @ts-expect-error system administration belongs to the account layer.
+      business_role: 'admin',
+    };
+    // @ts-expect-error every result submission must carry auditable references.
+    const invalidSubmission: TaskSubmitRequest = {
+      tenant_id: 'tenant_a',
+      version: 1,
+      result_summary: 'Delivered',
+    };
+
+    expect([invalidCreate.business_role, invalidUpdate.business_role, invalidSubmission.result_summary])
+      .toEqual(['admin', 'admin', 'Delivered']);
+  });
+
   it('targets the existing JSON endpoints with exact methods and field names', async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => (
       jsonResponse({})
@@ -299,6 +330,23 @@ describe('typed workbench API boundary', () => {
     });
     await listDepartments('tenant_a');
     await createDepartment({ tenant_id: 'tenant_a', name: '研发', code: 'DEV' });
+    await updateDepartment('department/1', {
+      tenant_id: 'tenant_a',
+      manager_user_id: 'user-1',
+    });
+    await listTenantUsers('tenant_a');
+    await createEmployee({
+      tenant_id: 'tenant_a',
+      user_id: 'user-2',
+      employee_no: 'E002',
+      department_id: 'department/1',
+      job_title: 'Engineer',
+      business_role: 'member',
+      level: 'P5',
+      skills: ['TypeScript'],
+      capacity_percent: 90,
+      daily_cost: 1200,
+    });
     await listEmployees('tenant_a');
     await updateEmployee('employee-1', {
       tenant_id: 'tenant_a',
@@ -385,6 +433,28 @@ describe('typed workbench API boundary', () => {
         url: '/api/enterprise/workbench/departments',
         method: 'POST',
         body: { tenant_id: 'tenant_a', name: '研发', code: 'DEV' },
+      },
+      {
+        url: '/api/enterprise/workbench/departments/department%2F1',
+        method: 'PATCH',
+        body: { tenant_id: 'tenant_a', manager_user_id: 'user-1' },
+      },
+      { url: '/api/auth/users?tenant_id=tenant_a', method: 'GET', body: undefined },
+      {
+        url: '/api/enterprise/workbench/employees',
+        method: 'POST',
+        body: {
+          tenant_id: 'tenant_a',
+          user_id: 'user-2',
+          employee_no: 'E002',
+          department_id: 'department/1',
+          job_title: 'Engineer',
+          business_role: 'member',
+          level: 'P5',
+          skills: ['TypeScript'],
+          capacity_percent: 90,
+          daily_cost: 1200,
+        },
       },
       { url: '/api/enterprise/workbench/employees?tenant_id=tenant_a', method: 'GET', body: undefined },
       {

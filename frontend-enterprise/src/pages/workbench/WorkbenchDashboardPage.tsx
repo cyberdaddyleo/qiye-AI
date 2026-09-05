@@ -27,6 +27,7 @@ import type {
 
 import WorkbenchLayout from './WorkbenchLayout';
 import { workbenchApi } from './workbenchApi';
+import { formatWorkbenchEvent } from './workbenchEvents';
 import { formatWorkload, projectProgress, taskStatusLabel } from './workbenchModel';
 import EmployeeBadgeContainer from './components/EmployeeBadgeContainer';
 import WorkbenchKpi from './components/WorkbenchKpi';
@@ -80,17 +81,7 @@ function formatCurrency(value: number): string {
 function eventLabel(event: WorkTaskEventRead, employees: Map<string, EmployeeRead>): string {
   const actor = event.actor_user_id ? employees.get(event.actor_user_id) : undefined;
   const name = actor?.display_name || actor?.username || (event.actor_type === 'system' ? '系统' : '成员');
-  const actions: Record<string, string> = {
-    task_created: '创建了任务',
-    task_updated: '更新了任务',
-    task_commented: '评论了任务',
-    task_submitted: '提交了任务',
-    task_reviewed: '审核了任务',
-    task_reworked: '退回了任务',
-    task_completed: '完成了任务',
-    plan_dispatched: '下发了执行方案',
-  };
-  return `${name}${actions[event.event_type] || '更新了工作动态'}`;
+  return formatWorkbenchEvent(event, name);
 }
 
 function DashboardLoading() {
@@ -370,7 +361,7 @@ export default function WorkbenchDashboardPage({
 function TaskRow({ task, employee, risk = false }: { task: TaskRead; employee?: EmployeeRead; risk?: boolean }) {
   return (
     <Link
-      to={`/enterprise/tasks/${encodeURIComponent(task.id)}`}
+      to={`/enterprise/tasks?task_id=${encodeURIComponent(task.id)}`}
       className="flex min-w-0 items-center justify-between gap-[14px] rounded-[12px] border border-[#edf0f5] px-[14px] py-[12px] transition-colors hover:bg-[#fafbfc]"
     >
       <span className="min-w-0">

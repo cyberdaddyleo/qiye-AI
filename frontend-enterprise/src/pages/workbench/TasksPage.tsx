@@ -54,6 +54,7 @@ function allowedScopes(access: WorkbenchAccessRead | null): Array<{ value: TaskS
 export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
   const [searchParams] = useSearchParams();
   const requestedProjectId = searchParams.get('project_id') || '';
+  const requestedTaskId = searchParams.get('task_id') || '';
   const [access, setAccess] = useState<WorkbenchAccessRead | null>(null);
   const [projects, setProjects] = useState<ProjectRead[]>([]);
   const [employees, setEmployees] = useState<EmployeeRead[]>([]);
@@ -70,6 +71,10 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');
   const [conflictMessage, setConflictMessage] = useState('');
+
+  useEffect(() => {
+    if (requestedTaskId) void openTask(requestedTaskId);
+  }, [currentUser.id, currentUser.tenant_id, requestedTaskId]);
 
   useEffect(() => {
     let active = true;
@@ -318,16 +323,21 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
           version: task.version,
           status: 'in_progress',
         }))}
+        onProgress={(progress) => mutateTask((task) => workbenchApi.updateTask(task.id, {
+          tenant_id: currentUser.tenant_id,
+          version: task.version,
+          progress,
+        }))}
         onComment={(comment) => mutateTask((task) => workbenchApi.commentTask(task.id, {
           tenant_id: currentUser.tenant_id,
           version: task.version,
           comment,
         }))}
-        onSubmit={(resultSummary) => mutateTask((task) => workbenchApi.submitTask(task.id, {
+        onSubmit={(resultSummary, artifactRefs) => mutateTask((task) => workbenchApi.submitTask(task.id, {
           tenant_id: currentUser.tenant_id,
           version: task.version,
           result_summary: resultSummary,
-          artifact_refs: [],
+          artifact_refs: artifactRefs,
         }))}
         onReview={(verdict: ReviewVerdict, comment) => mutateTask((task) => workbenchApi.reviewTask(task.id, {
           tenant_id: currentUser.tenant_id,

@@ -5,14 +5,18 @@ import {
   CircleAlert,
   Clock3,
   GitBranch,
+  Link2,
   MessageSquareText,
   Play,
+  Plus,
   RotateCcw,
   Send,
+  X,
 } from 'lucide-react';
 
 import type { EnterpriseAuthUser } from '@/auth';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Sheet,
   SheetContent,
@@ -27,10 +31,10 @@ import type {
   ProjectRead,
   ReviewVerdict,
   TaskRead,
-  WorkTaskEventRead,
   WorkbenchAccessRead,
 } from '@/types/workbench';
 
+import { eventDetail, formatWorkbenchEvent, latestArtifactRefs } from '../workbenchEvents';
 import { taskStatusLabel, taskStatusTone } from '../workbenchModel';
 import EmployeeBadgeContainer from './EmployeeBadgeContainer';
 
@@ -51,8 +55,9 @@ export type TaskDetailSheetProps = {
   onRetry?: () => void;
   onOpenTask?: (taskId: string) => void;
   onStart: () => Promise<boolean> | boolean;
+  onProgress: (progress: number) => Promise<boolean> | boolean;
   onComment: (comment: string) => Promise<boolean> | boolean;
-  onSubmit: (summary: string) => Promise<boolean> | boolean;
+  onSubmit: (summary: string, artifactRefs: string[]) => Promise<boolean> | boolean;
   onReview: (verdict: ReviewVerdict, comment: string) => Promise<boolean> | boolean;
 };
 
@@ -71,27 +76,6 @@ const PRIORITY_LABEL: Record<TaskRead['priority'], string> = {
   urgent: '紧急',
 };
 
-const EVENT_ACTION: Record<string, string> = {
-  task_created: '创建了任务',
-  task_assigned: '分配了真人负责人',
-  task_started: '开始了任务',
-  task_updated: '更新了任务',
-  progress_updated: '更新了进度',
-  comment_added: '添加了评论',
-  result_submitted: '提交了成果',
-  review_approved: '通过了任务',
-  review_returned: '退回了任务',
-  task_unblocked: '解除了阻塞',
-  dependency_unblocked: '因依赖完成自动解锁',
-  dependencies_updated: '更新了依赖',
-  task_canceled: '取消了任务',
-};
-
-function eventDetail(event: WorkTaskEventRead): string | null {
-  const value = event.payload.comment ?? event.payload.result_summary;
-  return typeof value === 'string' && value.trim() ? value : null;
-}
-
 export default function TaskDetailSheet({
   open,
   onOpenChange,
@@ -109,21 +93,30 @@ export default function TaskDetailSheet({
   onRetry,
   onOpenTask,
   onStart,
+  onProgress,
   onComment,
   onSubmit,
   onReview,
 }: TaskDetailSheetProps) {
   const [comment, setComment] = useState('');
   const [summary, setSummary] = useState('');
+  const [progress, setProgress] = useState('0');
+  const [artifactRefs, setArtifactRefs] = useState<string[]>(['']);
   const [reviewComment, setReviewComment] = useState('');
   const [formError, setFormError] = useState('');
 
   useEffect(() => {
     setComment('');
-    setSummary('');
+    setSummary(task?.result_summary || '');
+    const existingRefs = latestArtifactRefs(task?.events || []);
+    setArtifactRefs(existingRefs.length ? existingRefs : ['']);
     setReviewComment('');
     setFormError('');
   }, [task?.id]);
+
+  useEffect(() => {
+    setProgress(String(task?.progress ?? 0));
+  }, [task?.id, task?.progress]);
 
   const employeeByUserId = useMemo(
     () => new Map(employees.map((employee) => [employee.user_id, employee])),
@@ -159,6 +152,8 @@ export default function TaskDetailSheet({
     (event.event_type === 'review_returned' || event.event_type === 'review_approved')
     && eventDetail(event)
   ));
+  const submittedArtifactRefs = latestArtifactRefs(events);
+  const isResubmission = Boolean(task?.result_summary || submittedArtifactRefs.length);
 
   async function submitComment() {
     const value = comment.trim();
@@ -176,8 +171,39 @@ export default function TaskDetailSheet({
       setFormError('请输入成果摘要。');
       return;
     }
+    const refs = [...new Set(artifactRefs.map((reference) => reference.trim()).filter(Boolean))];
+    if (!refs.length) {
+      setFormError('请至少填写一个成果引用（URL 或资源 ID）。');
+      return;
+    }
     setFormError('');
-    if (await onSubmit(value)) setSummary('');
+    if (await onSubmit(value, refs)) {
+      setSummary('');
+      setArtifactRefs(['']);
+    }
+  }
+
+  async function submitProgress() {
+    const value = Number(progress);
+    if (!Number.isInteger(value) || value < 0 || value > 100) {
+      setFormError('任务进度必须是 0 到 100 的整数。');
+      return;
+    }
+    setFormError('');
+    await onProgress(value);
+  }
+
+  function changeArtifactRef(index: number, value: string) {
+    setArtifactRefs((current) => current.map((reference, currentIndex) => (
+      currentIndex === index ? value : reference
+    )));
+  }
+
+  function removeArtifactRef(index: number) {
+    setArtifactRefs((current) => {
+      const next = current.filter((_, currentIndex) => currentIndex !== index);
+      return next.length ? next : [''];
+    });
   }
 
   async function review(verdict: ReviewVerdict) {
@@ -274,10 +300,26 @@ export default function TaskDetailSheet({
                 </div>
               </section>
 
-              {(task.result_summary || latestReviewerComment) && (
+              {(task.result_summary || submittedArtifactRefs.length || latestReviewerComment) && (
                 <section className="rounded-[14px] border border-[#edf0f5] bg-white p-[15px]">
                   <h3 className="m-0 text-[12px] font-semibold text-[#464c5e]">成果与审核</h3>
                   {task.result_summary && <div className="mt-[10px]"><p className="m-0 text-[10px] font-medium text-[#858b9c]">成果摘要</p><p className="mt-[5px] mb-0 whitespace-pre-wrap text-[11px] leading-[18px] text-[#596176]">{task.result_summary}</p></div>}
+                  {submittedArtifactRefs.length > 0 && (
+                    <div className="mt-[10px] border-t border-[#f0f2f6] pt-[10px]">
+                      <p className="m-0 text-[10px] font-medium text-[#858b9c]">成果引用</p>
+                      <ul className="mt-[6px] mb-0 grid gap-[5px] p-0">
+                        {submittedArtifactRefs.map((reference) => {
+                          const url = safeArtifactUrl(reference);
+                          return (
+                            <li key={reference} className="flex min-w-0 list-none items-center gap-[5px] text-[10px] text-[#596176]">
+                              <Link2 className="size-[11px] shrink-0" aria-hidden="true" />
+                              {url ? <a href={url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-[#1a71ff] hover:underline" data-i18n-ignore>{reference}</a> : <span className="min-w-0 break-all font-mono" data-i18n-ignore>{reference}</span>}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
                   {latestReviewerComment && <div className="mt-[10px] border-t border-[#f0f2f6] pt-[10px]"><p className="m-0 text-[10px] font-medium text-[#858b9c]">审核意见</p><p className="mt-[5px] mb-0 whitespace-pre-wrap text-[11px] leading-[18px] text-[#596176]">{eventDetail(latestReviewerComment)}</p></div>}
                 </section>
               )}
@@ -304,11 +346,34 @@ export default function TaskDetailSheet({
 
               {task.status === 'in_progress' && canExecute && (
                 <section className="rounded-[14px] border border-[#dfe6f2] bg-white p-[15px]">
+                  <div className="grid gap-[7px] rounded-[10px] bg-[#f7f9fc] p-[10px] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                    <label className="grid gap-[5px]">
+                      <span className="text-[11px] font-medium text-[#596176]">任务进度</span>
+                      <span className="flex items-center gap-[8px]"><Input aria-label="任务进度" type="number" min="0" max="100" step="1" value={progress} onChange={(event) => setProgress(event.target.value)} className="h-[33px] min-w-0 rounded-[8px] border-[#e3e7f1] text-[11px]" /><span className="shrink-0 text-[10px] text-[#858b9c]">%</span></span>
+                    </label>
+                    <Button type="button" variant="outline" disabled={busy || !progress || Number(progress) === task.progress} onClick={() => void submitProgress()} className="h-[33px] rounded-[8px] border-[#dce2ec] px-[12px] text-[10px] text-[#596176]">保存进度</Button>
+                  </div>
                   <label className="grid gap-[6px]">
-                    <span className="text-[11px] font-medium text-[#596176]">成果摘要</span>
+                    <span className="mt-[11px] text-[11px] font-medium text-[#596176]">成果摘要</span>
                     <Textarea value={summary} onChange={(event) => setSummary(event.target.value)} className="min-h-[82px] rounded-[9px] border-[#e3e7f1] text-[11px]" />
                   </label>
-                  <Button type="button" disabled={busy || !summary.trim()} onClick={() => void submitResult()} className="mt-[9px] h-[33px] w-full gap-[5px] rounded-[9px] bg-[#1a71ff] text-[11px] text-white hover:bg-[#0f5ed7]"><Send className="size-[12px]" aria-hidden="true" />提交成果</Button>
+                  <div className="mt-[10px] grid gap-[7px]">
+                    <div className="flex items-center justify-between gap-[8px]">
+                      <span className="text-[11px] font-medium text-[#596176]">成果引用</span>
+                      <Button type="button" variant="ghost" disabled={busy || artifactRefs.length >= 100} onClick={() => setArtifactRefs((current) => [...current, ''])} className="h-[27px] gap-[4px] rounded-[7px] px-[7px] text-[9px] text-[#1a71ff]"><Plus className="size-[10px]" aria-hidden="true" />添加成果引用</Button>
+                    </div>
+                    {artifactRefs.map((reference, index) => (
+                      <div key={index} className="flex items-end gap-[6px]">
+                        <label className="grid min-w-0 flex-1 gap-[4px]">
+                          <span className="sr-only">成果引用 {index + 1}</span>
+                          <Input aria-label={`成果引用 ${index + 1}`} value={reference} onChange={(event) => changeArtifactRef(index, event.target.value)} placeholder="https://… 或资源 ID" className="h-[33px] rounded-[8px] border-[#e3e7f1] text-[11px]" data-i18n-ignore />
+                        </label>
+                        {artifactRefs.length > 1 && <Button type="button" variant="ghost" aria-label={`移除成果引用 ${index + 1}`} disabled={busy} onClick={() => removeArtifactRef(index)} className="size-[33px] rounded-[8px] p-0 text-[#9aa1b3]"><X className="size-[12px]" aria-hidden="true" /></Button>}
+                      </div>
+                    ))}
+                    <p className="m-0 text-[9px] leading-[15px] text-[#9aa1b3]">可填写文档 URL、知识库资源 ID 或其他可审计成果标识。</p>
+                  </div>
+                  <Button type="button" disabled={busy || !summary.trim() || !artifactRefs.some((reference) => reference.trim())} onClick={() => void submitResult()} className="mt-[9px] h-[33px] w-full gap-[5px] rounded-[9px] bg-[#1a71ff] text-[11px] text-white hover:bg-[#0f5ed7]"><Send className="size-[12px]" aria-hidden="true" />{isResubmission ? '重新提交成果' : '提交成果'}</Button>
                 </section>
               )}
 
@@ -335,7 +400,7 @@ export default function TaskDetailSheet({
                       const detail = eventDetail(event);
                       return (
                         <li key={event.id} className="list-none border-l-2 border-[#dce5f3] pl-[11px]">
-                          <p className="m-0 text-[11px] font-medium text-[#464c5e]">{actorName}{EVENT_ACTION[event.event_type] || '更新了任务'}</p>
+                          <p className="m-0 text-[11px] font-medium text-[#464c5e]">{formatWorkbenchEvent(event, actorName, '更新了任务')}</p>
                           {detail && <p className="mt-[3px] mb-0 whitespace-pre-wrap text-[10px] leading-[16px] text-[#757f9c]">{detail}</p>}
                           <time className="mt-[3px] block text-[9px] text-[#9aa1b3]">{formatDateTime(event.created_at)}</time>
                         </li>
@@ -350,6 +415,15 @@ export default function TaskDetailSheet({
       </SheetContent>
     </Sheet>
   );
+}
+
+function safeArtifactUrl(reference: string): string | null {
+  try {
+    const url = new URL(reference);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 function Info({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -24,9 +24,13 @@ vi.mock('./workbenchApi', async (importOriginal) => {
     ...original,
     workbenchApi: {
       ...original.workbenchApi,
+      getAccess: vi.fn(),
       listDepartments: vi.fn(),
       createDepartment: vi.fn(),
+      updateDepartment: vi.fn(),
       listEmployees: vi.fn(),
+      listTenantUsers: vi.fn(),
+      createEmployee: vi.fn(),
       updateEmployee: vi.fn(),
       importEmployees: vi.fn(),
     },
@@ -86,6 +90,62 @@ const employee: EmployeeRead = {
   updated_at: '2026-09-04T08:00:00Z',
 };
 
+const inactiveEmployee: EmployeeRead = {
+  ...employee,
+  id: 'employee-former',
+  user_id: 'user-former',
+  username: 'former',
+  display_name: '离职员工',
+  employee_no: 'E003',
+  status: 'inactive',
+};
+
+const newEmployee: EmployeeRead = {
+  ...employee,
+  id: 'employee-new',
+  user_id: 'user-new',
+  username: 'new.user',
+  display_name: '新增成员',
+  employee_no: 'E009',
+  job_title: '增长运营',
+  business_role: 'manager',
+  skills: ['增长', '数据分析'],
+  capacity_percent: 75,
+  daily_cost: 900,
+  manager_user_id: null,
+};
+
+const tenantUsers = [
+  {
+    id: admin.id,
+    tenant_id: admin.tenant_id,
+    username: admin.username,
+    display_name: admin.display_name,
+    role: admin.role,
+  },
+  {
+    id: employee.user_id,
+    tenant_id: employee.tenant_id,
+    username: employee.username,
+    display_name: employee.display_name || undefined,
+    role: 'member' as const,
+  },
+  {
+    id: inactiveEmployee.user_id,
+    tenant_id: inactiveEmployee.tenant_id,
+    username: inactiveEmployee.username,
+    display_name: inactiveEmployee.display_name || undefined,
+    role: 'member' as const,
+  },
+  {
+    id: newEmployee.user_id,
+    tenant_id: newEmployee.tenant_id,
+    username: newEmployee.username,
+    display_name: newEmployee.display_name || undefined,
+    role: 'member' as const,
+  },
+];
+
 const assistant: AgentProfileRead = {
   id: 'agent-product',
   tenant_id: 'tenant-demo',
@@ -123,6 +183,15 @@ function renderOrganization(user = admin) {
 
 describe('OrganizationPage', () => {
   beforeEach(() => {
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue({
+      tenant_id: admin.tenant_id,
+      user_id: admin.id,
+      business_role: 'admin',
+      directory_scope: 'all',
+      can_create_project: true,
+      can_view_all: true,
+      managed_department_ids: [],
+    });
     vi.mocked(workbenchApi.listDepartments).mockResolvedValue([department]);
     vi.mocked(workbenchApi.listEmployees).mockResolvedValue([employee]);
     vi.mocked(workbenchApi.createDepartment).mockResolvedValue({
@@ -136,6 +205,9 @@ describe('OrganizationPage', () => {
       job_title: '高级产品经理',
       assistant_agent_id: assistant.id,
     });
+    vi.mocked(workbenchApi.updateDepartment).mockResolvedValue(department);
+    vi.mocked(workbenchApi.listTenantUsers).mockResolvedValue(tenantUsers);
+    vi.mocked(workbenchApi.createEmployee).mockResolvedValue(newEmployee);
     vi.mocked(workbenchApi.importEmployees).mockResolvedValue(importResult);
   });
 
@@ -162,6 +234,143 @@ describe('OrganizationPage', () => {
       name: '增长部',
       code: 'GROWTH',
     });
+  });
+
+  it('creates a complete employee profile from an unprofiled same-tenant account and refreshes organization data', async () => {
+    vi.mocked(workbenchApi.listEmployees)
+      .mockResolvedValueOnce([employee, inactiveEmployee])
+      .mockResolvedValueOnce([employee, inactiveEmployee, newEmployee]);
+    const user = userEvent.setup();
+    renderOrganization();
+    await screen.findByText('林珊');
+
+    await user.click(screen.getByRole('button', { name: '手工建档' }));
+    const dialog = await screen.findByRole('dialog', { name: '手工创建员工档案' });
+    const account = within(dialog).getByLabelText('关联账号');
+    expect(within(account).queryByRole('option', { name: /林珊/ })).toBeNull();
+    expect(within(account).queryByRole('option', { name: /离职员工/ })).toBeNull();
+    await user.selectOptions(account, newEmployee.user_id);
+    await user.type(within(dialog).getByLabelText('员工工号'), 'E009');
+    await user.type(within(dialog).getByLabelText('岗位'), '增长运营');
+    await user.selectOptions(within(dialog).getByLabelText('所属部门'), department.id);
+    await user.selectOptions(within(dialog).getByLabelText('业务角色'), 'manager');
+    await user.type(within(dialog).getByLabelText('职级'), 'P5');
+    await user.type(within(dialog).getByLabelText('技能（逗号分隔）'), '增长，数据分析');
+    await user.clear(within(dialog).getByLabelText('可用率'));
+    await user.type(within(dialog).getByLabelText('可用率'), '75');
+    await user.type(within(dialog).getByLabelText('日成本'), '900');
+    await user.click(within(dialog).getByRole('button', { name: '创建员工档案' }));
+
+    expect(workbenchApi.createEmployee).toHaveBeenCalledWith({
+      tenant_id: admin.tenant_id,
+      user_id: newEmployee.user_id,
+      employee_no: 'E009',
+      department_id: department.id,
+      job_title: '增长运营',
+      business_role: 'manager',
+      level: 'P5',
+      skills: ['增长', '数据分析'],
+      capacity_percent: 75,
+      daily_cost: 900,
+      manager_user_id: null,
+      assistant_agent_id: null,
+    });
+    expect(await screen.findByText('新增成员')).toBeTruthy();
+    expect(workbenchApi.listDepartments).toHaveBeenCalledTimes(2);
+    expect(workbenchApi.listEmployees).toHaveBeenCalledTimes(2);
+    expect(workbenchApi.getAccess).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows an empty manual-profile state when every account already has an active or inactive profile', async () => {
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValue([employee, inactiveEmployee]);
+    vi.mocked(workbenchApi.listTenantUsers).mockResolvedValue([
+      tenantUsers[1],
+      tenantUsers[2],
+    ]);
+    const user = userEvent.setup();
+    renderOrganization();
+    await screen.findByText('林珊');
+
+    await user.click(screen.getByRole('button', { name: '手工建档' }));
+    const dialog = await screen.findByRole('dialog', { name: '手工创建员工档案' });
+
+    expect(within(dialog).getByText('所有同租户账号都已建立员工档案。')).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: '创建员工档案' })).toHaveProperty('disabled', true);
+    expect(workbenchApi.createEmployee).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [403, '当前账号无权创建员工档案。'],
+    [409, '该账号已有员工档案，已刷新组织数据。'],
+    [422, '员工档案信息不符合要求，请检查后重试。'],
+  ])('handles employee creation HTTP %s without closing the form', async (status, message) => {
+    vi.mocked(workbenchApi.createEmployee).mockRejectedValueOnce(
+      new ApiError(status, JSON.stringify({ detail: 'request rejected' }), 'Request rejected'),
+    );
+    const user = userEvent.setup();
+    renderOrganization();
+    await screen.findByText('林珊');
+    await user.click(screen.getByRole('button', { name: '手工建档' }));
+    const dialog = await screen.findByRole('dialog', { name: '手工创建员工档案' });
+    await user.selectOptions(within(dialog).getByLabelText('关联账号'), newEmployee.user_id);
+    await user.click(within(dialog).getByRole('button', { name: '创建员工档案' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveProperty(
+      'textContent',
+      expect.stringContaining(message),
+    );
+    expect(within(dialog).getByRole('button', { name: '创建员工档案' })).toBeTruthy();
+  });
+
+  it('appoints a real department manager and reloads departments, employees, and access', async () => {
+    const appointedDepartment = { ...department, manager_user_id: employee.user_id };
+    const appointedEmployee = { ...employee, business_role: 'manager' as const };
+    vi.mocked(workbenchApi.updateEmployee).mockResolvedValueOnce(appointedEmployee);
+    vi.mocked(workbenchApi.updateDepartment).mockResolvedValueOnce(appointedDepartment);
+    vi.mocked(workbenchApi.listDepartments)
+      .mockResolvedValueOnce([department])
+      .mockResolvedValueOnce([appointedDepartment]);
+    vi.mocked(workbenchApi.listEmployees)
+      .mockResolvedValueOnce([employee])
+      .mockResolvedValueOnce([appointedEmployee]);
+    const user = userEvent.setup();
+    renderOrganization();
+    await screen.findByText('林珊');
+
+    await user.click(screen.getByRole('button', { name: '任命产品部负责人' }));
+    const dialog = await screen.findByRole('dialog', { name: '任命部门负责人' });
+    await user.selectOptions(within(dialog).getByLabelText('部门负责人'), employee.user_id);
+    await user.click(within(dialog).getByRole('button', { name: '确认任命' }));
+
+    expect(workbenchApi.updateEmployee).toHaveBeenCalledWith(employee.id, {
+      tenant_id: admin.tenant_id,
+      business_role: 'manager',
+    });
+    expect(workbenchApi.updateDepartment).toHaveBeenCalledWith(department.id, {
+      tenant_id: admin.tenant_id,
+      manager_user_id: employee.user_id,
+    });
+    await waitFor(() => {
+      expect(workbenchApi.listDepartments).toHaveBeenCalledTimes(2);
+      expect(workbenchApi.listEmployees).toHaveBeenCalledTimes(2);
+      expect(workbenchApi.getAccess).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByText('负责人：林珊')).toBeTruthy();
+  });
+
+  it('never offers account administrator as an employee business role', async () => {
+    const user = userEvent.setup();
+    renderOrganization();
+    await screen.findByText('林珊');
+
+    await user.click(screen.getByRole('button', { name: '编辑林珊' }));
+    const editor = await screen.findByRole('dialog', { name: '编辑员工：林珊' });
+    expect(within(within(editor).getByLabelText('业务角色')).queryByRole('option', { name: '管理员' })).toBeNull();
+    await user.click(within(editor).getByRole('button', { name: '取消' }));
+
+    await user.click(screen.getByRole('button', { name: '手工建档' }));
+    const creator = await screen.findByRole('dialog', { name: '手工创建员工档案' });
+    expect(within(within(creator).getByLabelText('业务角色')).queryByRole('option', { name: '管理员' })).toBeNull();
   });
 
   it('edits a real employee and binds an existing AI assistant as a capability', async () => {
@@ -256,6 +465,15 @@ describe('OrganizationPage', () => {
   });
 
   it('shows a member returned organization data without mutation controls', async () => {
+    vi.mocked(workbenchApi.getAccess).mockResolvedValueOnce({
+      tenant_id: admin.tenant_id,
+      user_id: employee.user_id,
+      business_role: 'member',
+      directory_scope: 'self',
+      can_create_project: false,
+      can_view_all: false,
+      managed_department_ids: [],
+    });
     renderOrganization({
       id: 'user-lin',
       tenant_id: 'tenant-demo',
@@ -270,8 +488,38 @@ describe('OrganizationPage', () => {
       expect.stringContaining('组织信息为只读'),
     );
     expect(screen.queryByRole('button', { name: '新建部门' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '手工建档' })).toBeNull();
     expect(screen.queryByRole('button', { name: '导入员工' })).toBeNull();
     expect(screen.queryByRole('button', { name: /编辑/ })).toBeNull();
+  });
+
+  it('uses server access for a non-global manager without exposing global organization actions', async () => {
+    const managerUser: EnterpriseAuthUser = {
+      id: 'user-manager',
+      tenant_id: admin.tenant_id,
+      username: 'manager',
+      display_name: '部门经理',
+      role: 'member',
+    };
+    vi.mocked(workbenchApi.getAccess).mockResolvedValueOnce({
+      tenant_id: admin.tenant_id,
+      user_id: managerUser.id,
+      business_role: 'manager',
+      directory_scope: 'department',
+      can_create_project: true,
+      can_view_all: false,
+      managed_department_ids: [department.id],
+    });
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([employee]);
+
+    renderOrganization(managerUser);
+
+    expect(await screen.findByRole('button', { name: '编辑林珊' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '手工建档' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '新建部门' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '导入员工' })).toBeNull();
+    expect(screen.queryByLabelText('部门负责人管理')).toBeNull();
+    expect(workbenchApi.listTenantUsers).not.toHaveBeenCalled();
   });
 
   it('shows a permission-denied state without organization mutations', async () => {
@@ -295,8 +543,10 @@ describe('OrganizationPage', () => {
       expect.stringContaining('组织信息为只读'),
     );
     expect(screen.queryByRole('button', { name: '新建部门' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '手工建档' })).toBeNull();
     expect(screen.queryByRole('button', { name: '导入员工' })).toBeNull();
     expect(screen.queryByRole('button', { name: /编辑/ })).toBeNull();
+    expect(workbenchApi.listTenantUsers).not.toHaveBeenCalled();
   });
 
   it('rejects unsupported import files before calling the backend', async () => {

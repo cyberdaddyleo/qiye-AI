@@ -19,6 +19,7 @@ import type {
 import WorkbenchLayout from './WorkbenchLayout';
 import { workbenchApi } from './workbenchApi';
 import { isTaskOverdue } from './workbenchDate';
+import { formatWorkbenchEvent } from './workbenchEvents';
 import TaskCard from './components/TaskCard';
 import TaskDetailSheet from './components/TaskDetailSheet';
 import WorkbenchKpi from './components/WorkbenchKpi';
@@ -53,19 +54,6 @@ const PRIORITY_ORDER: Record<TaskRead['priority'], number> = {
   low: 3,
 };
 
-const EVENT_ACTION: Record<string, string> = {
-  task_created: '创建了任务',
-  task_assigned: '分配了任务',
-  task_started: '开始了任务',
-  task_updated: '更新了任务',
-  progress_updated: '更新了进度',
-  comment_added: '添加了评论',
-  result_submitted: '提交了成果',
-  review_approved: '通过了任务',
-  review_returned: '退回了任务',
-  dependency_unblocked: '解锁了任务',
-};
-
 function roleHeadline(access: WorkbenchAccessRead, currentUser: EnterpriseAuthUser): string {
   const name = currentUser.display_name || currentUser.username;
   if (access.business_role === 'admin' || access.business_role === 'ceo') {
@@ -84,7 +72,7 @@ function eventLabel(
   const name = event.actor_user_id === currentUser.id
     ? currentUser.display_name || currentUser.username
     : actor?.display_name || actor?.username || (event.actor_type === 'system' ? '系统' : '真人成员');
-  return `${name}${EVENT_ACTION[event.event_type] || '更新了工作动态'}`;
+  return formatWorkbenchEvent(event, name);
 }
 
 export default function MyWorkPage({
@@ -381,8 +369,9 @@ export default function MyWorkPage({
         onRetry={() => detailTaskId && void openTask(detailTaskId)}
         onOpenTask={(taskId) => void openTask(taskId)}
         onStart={() => mutateTask((task) => workbenchApi.updateTask(task.id, { tenant_id: currentUser.tenant_id, version: task.version, status: 'in_progress' }))}
+        onProgress={(progress) => mutateTask((task) => workbenchApi.updateTask(task.id, { tenant_id: currentUser.tenant_id, version: task.version, progress }))}
         onComment={(comment) => mutateTask((task) => workbenchApi.commentTask(task.id, { tenant_id: currentUser.tenant_id, version: task.version, comment }))}
-        onSubmit={(resultSummary) => mutateTask((task) => workbenchApi.submitTask(task.id, { tenant_id: currentUser.tenant_id, version: task.version, result_summary: resultSummary, artifact_refs: [] }))}
+        onSubmit={(resultSummary, artifactRefs) => mutateTask((task) => workbenchApi.submitTask(task.id, { tenant_id: currentUser.tenant_id, version: task.version, result_summary: resultSummary, artifact_refs: artifactRefs }))}
         onReview={(verdict: ReviewVerdict, comment) => mutateTask((task) => workbenchApi.reviewTask(task.id, { tenant_id: currentUser.tenant_id, version: task.version, verdict, comment: comment || null }))}
       />
     </WorkbenchLayout>

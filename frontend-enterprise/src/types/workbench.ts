@@ -1,4 +1,5 @@
 export type BusinessRole = 'admin' | 'ceo' | 'manager' | 'member';
+export type AssignableBusinessRole = Exclude<BusinessRole, 'admin'>;
 export type WorkbenchDirectoryScope = 'all' | 'department' | 'self';
 export type DepartmentStatus = 'active' | 'archived';
 export type EmployeeStatus = 'active' | 'inactive';
@@ -287,7 +288,7 @@ export type TaskSubmitRequest = {
   tenant_id: string;
   version: number;
   result_summary: string;
-  artifact_refs?: string[];
+  artifact_refs: string[];
 };
 
 export type TaskReviewRequest = {
@@ -305,12 +306,48 @@ export type DepartmentCreateRequest = {
   manager_user_id?: string | null;
 };
 
+export type DepartmentUpdateRequest = {
+  tenant_id: string;
+  name?: string;
+  code?: string;
+  parent_id?: string | null;
+  manager_user_id?: string | null;
+  status?: DepartmentStatus;
+};
+
+export type TenantUserRead = {
+  id: string;
+  tenant_id: string;
+  username: string;
+  display_name?: string | null;
+  role: 'admin' | 'member';
+  source?: string;
+  avatar_url?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type EmployeeCreateRequest = {
+  tenant_id: string;
+  user_id: string;
+  employee_no?: string | null;
+  department_id?: string | null;
+  job_title?: string | null;
+  business_role?: AssignableBusinessRole;
+  level?: string | null;
+  skills?: string[];
+  capacity_percent?: number;
+  daily_cost?: number | null;
+  manager_user_id?: string | null;
+  assistant_agent_id?: string | null;
+};
+
 export type EmployeeUpdateRequest = {
   tenant_id: string;
   employee_no?: string | null;
   department_id?: string | null;
   job_title?: string | null;
-  business_role?: BusinessRole;
+  business_role?: AssignableBusinessRole;
   level?: string | null;
   skills?: string[];
   capacity_percent?: number;

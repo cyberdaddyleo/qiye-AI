@@ -4,6 +4,8 @@ import type {
   DashboardRead,
   DepartmentCreateRequest,
   DepartmentRead,
+  DepartmentUpdateRequest,
+  EmployeeCreateRequest,
   EmployeeImportResult,
   EmployeeRead,
   EmployeeUpdateRequest,
@@ -18,6 +20,7 @@ import type {
   TaskReviewRequest,
   TaskSubmitRequest,
   TaskUpdateRequest,
+  TenantUserRead,
   WorkbenchAccessRead,
 } from '@/types/workbench';
 
@@ -115,8 +118,27 @@ export function createDepartment(request: DepartmentCreateRequest): Promise<Depa
   return api.post(`${WORKBENCH_API}/departments`, request);
 }
 
+export function updateDepartment(
+  departmentId: string,
+  request: DepartmentUpdateRequest,
+): Promise<DepartmentRead> {
+  return directRequest(resourcePath('departments', departmentId), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+}
+
 export function listEmployees(tenantId = TENANT_ID): Promise<EmployeeRead[]> {
   return api.get(queryPath(`${WORKBENCH_API}/employees`, { tenant_id: tenantId }));
+}
+
+export function listTenantUsers(tenantId = TENANT_ID): Promise<TenantUserRead[]> {
+  return api.get(queryPath('/api/auth/users', { tenant_id: tenantId }));
+}
+
+export function createEmployee(request: EmployeeCreateRequest): Promise<EmployeeRead> {
+  return api.post(`${WORKBENCH_API}/employees`, request);
 }
 
 export function updateEmployee(
@@ -154,7 +176,10 @@ export const workbenchApi = {
   reviewTask,
   listDepartments,
   createDepartment,
+  updateDepartment,
   listEmployees,
+  listTenantUsers,
+  createEmployee,
   updateEmployee,
   importEmployees,
 };

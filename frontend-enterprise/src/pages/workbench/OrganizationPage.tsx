@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { CircleAlert, FileSpreadsheet, Plus, Search, UsersRound } from 'lucide-react';
+import { CircleAlert, FileSpreadsheet, Plus, Search, UserPlus, UsersRound } from 'lucide-react';
 
 import { ApiError } from '@/api/client';
 import type { EnterpriseAuthUser } from '@/auth';
@@ -30,12 +30,16 @@ import {
 } from '@/lib/enterprise-ui';
 import type { AgentProfileRead } from '@/types';
 import type {
+  AssignableBusinessRole,
   BusinessRole,
   DepartmentRead,
+  EmployeeCreateRequest,
   EmployeeImportResult,
   EmployeeRead,
   EmployeeStatus,
   EmployeeUpdateRequest,
+  TenantUserRead,
+  WorkbenchAccessRead,
 } from '@/types/workbench';
 
 import WorkbenchLayout from './WorkbenchLayout';
@@ -50,7 +54,7 @@ export type OrganizationPageProps = {
 };
 
 const ROLE_LABEL: Record<BusinessRole, string> = {
-  admin: '管理员',
+  admin: '账号管理员',
   ceo: 'CEO',
   manager: '部门负责人',
   member: '普通员工',
@@ -60,7 +64,7 @@ type EmployeeForm = {
   employeeNo: string;
   departmentId: string;
   jobTitle: string;
-  businessRole: BusinessRole;
+  businessRole: AssignableBusinessRole;
   level: string;
   skills: string;
   capacityPercent: string;
@@ -68,6 +72,24 @@ type EmployeeForm = {
   managerUserId: string;
   assistantAgentId: string;
   status: EmployeeStatus;
+};
+
+type CreateEmployeeForm = Omit<EmployeeForm, 'status'> & {
+  userId: string;
+};
+
+const EMPTY_CREATE_EMPLOYEE_FORM: CreateEmployeeForm = {
+  userId: '',
+  employeeNo: '',
+  departmentId: '',
+  jobTitle: '',
+  businessRole: 'member',
+  level: '',
+  skills: '',
+  capacityPercent: '100',
+  dailyCost: '',
+  managerUserId: '',
+  assistantAgentId: '',
 };
 
 function employeeName(employee: EmployeeRead): string {
@@ -79,7 +101,7 @@ function employeeForm(employee: EmployeeRead): EmployeeForm {
     employeeNo: employee.employee_no || '',
     departmentId: employee.department_id || '',
     jobTitle: employee.job_title || '',
-    businessRole: employee.business_role,
+    businessRole: employee.business_role === 'admin' ? 'member' : employee.business_role,
     level: employee.level || '',
     skills: employee.skills.join('，'),
     capacityPercent: String(employee.capacity_percent),
@@ -102,6 +124,7 @@ export default function OrganizationPage({
 }: OrganizationPageProps) {
   const [departments, setDepartments] = useState<DepartmentRead[]>([]);
   const [employees, setEmployees] = useState<EmployeeRead[]>([]);
+  const [access, setAccess] = useState<WorkbenchAccessRead | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -116,6 +139,17 @@ export default function OrganizationPage({
   const [editForm, setEditForm] = useState<EmployeeForm | null>(null);
   const [employeeSaving, setEmployeeSaving] = useState(false);
   const [employeeError, setEmployeeError] = useState('');
+  const [createEmployeeOpen, setCreateEmployeeOpen] = useState(false);
+  const [createEmployeeForm, setCreateEmployeeForm] = useState<CreateEmployeeForm>(EMPTY_CREATE_EMPLOYEE_FORM);
+  const [tenantUsers, setTenantUsers] = useState<TenantUserRead[]>([]);
+  const [tenantUsersLoading, setTenantUsersLoading] = useState(false);
+  const [tenantUsersError, setTenantUsersError] = useState('');
+  const [employeeCreating, setEmployeeCreating] = useState(false);
+  const [createEmployeeError, setCreateEmployeeError] = useState('');
+  const [managerDepartment, setManagerDepartment] = useState<DepartmentRead | null>(null);
+  const [managerUserId, setManagerUserId] = useState('');
+  const [managerSaving, setManagerSaving] = useState(false);
+  const [managerError, setManagerError] = useState('');
   const [importOpen, setImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importError, setImportError] = useState('');
@@ -127,16 +161,19 @@ export default function OrganizationPage({
     setLoading(true);
     setError(null);
     void Promise.all([
+      workbenchApi.getAccess(currentUser.tenant_id),
       workbenchApi.listDepartments(currentUser.tenant_id),
       workbenchApi.listEmployees(currentUser.tenant_id),
-    ]).then(([departmentRows, employeeRows]) => {
+    ]).then(([accessRow, departmentRows, employeeRows]) => {
       if (!active) return;
+      setAccess(accessRow);
       setDepartments(Array.isArray(departmentRows) ? departmentRows : []);
       setEmployees(Array.isArray(employeeRows) ? employeeRows : []);
       setLoading(false);
     }).catch((caught) => {
       if (!active) return;
       setError(caught);
+      setAccess(null);
       setDepartments([]);
       setEmployees([]);
       setLoading(false);
@@ -146,9 +183,8 @@ export default function OrganizationPage({
     };
   }, [currentUser.tenant_id, refreshKey]);
 
-  const self = employees.find((employee) => employee.user_id === currentUser.id);
-  const canManageAll = currentUser.role === 'admin' || self?.business_role === 'ceo';
-  const canEditEmployees = canManageAll || self?.business_role === 'manager';
+  const canManageAll = currentUser.role === 'admin' || access?.can_view_all === true;
+  const canEditEmployees = canManageAll || access?.business_role === 'manager';
   const canShowMutations = !loading && !error;
   const activeDepartments = useMemo(
     () => departments.filter((department) => department.status === 'active'),
@@ -189,12 +225,157 @@ export default function OrganizationPage({
       ].some((value) => value?.toLocaleLowerCase().includes(needle));
     });
   }, [employees, search, selectedDepartment]);
+  const profiledUserIds = useMemo(
+    () => new Set(employees.map((employee) => employee.user_id)),
+    [employees],
+  );
+  const profileCandidates = useMemo(
+    () => tenantUsers.filter((user) => (
+      user.tenant_id === currentUser.tenant_id && !profiledUserIds.has(user.id)
+    )),
+    [currentUser.tenant_id, profiledUserIds, tenantUsers],
+  );
+  const managerCandidates = useMemo(
+    () => employees.filter((employee) => (
+      employee.status === 'active'
+      && employee.department_id === managerDepartment?.id
+    )),
+    [employees, managerDepartment?.id],
+  );
 
   function openDepartmentDialog() {
     setDepartmentName('');
     setDepartmentCode('');
     setDepartmentError('');
     setDepartmentDialogOpen(true);
+  }
+
+  async function loadTenantUsers() {
+    setTenantUsersLoading(true);
+    setTenantUsersError('');
+    try {
+      const rows = await workbenchApi.listTenantUsers(currentUser.tenant_id);
+      setTenantUsers(Array.isArray(rows) ? rows : []);
+    } catch (caught) {
+      setTenantUsers([]);
+      setTenantUsersError(caught instanceof ApiError && caught.status === 403
+        ? '当前账号无权读取同租户账号。'
+        : '账号候选加载失败，请重试。');
+    } finally {
+      setTenantUsersLoading(false);
+    }
+  }
+
+  function openCreateEmployeeDialog() {
+    setCreateEmployeeForm(EMPTY_CREATE_EMPLOYEE_FORM);
+    setCreateEmployeeError('');
+    setCreateEmployeeOpen(true);
+    void loadTenantUsers();
+  }
+
+  async function createEmployee(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const capacity = Number(createEmployeeForm.capacityPercent);
+    const dailyCost = createEmployeeForm.dailyCost ? Number(createEmployeeForm.dailyCost) : null;
+    if (!createEmployeeForm.userId || !profileCandidates.some((account) => account.id === createEmployeeForm.userId)) {
+      setCreateEmployeeError('请选择要建档的同租户账号。');
+      return;
+    }
+    if (!Number.isFinite(capacity) || capacity < 0 || capacity > 100) {
+      setCreateEmployeeError('可用率必须在 0 到 100 之间。');
+      return;
+    }
+    if (dailyCost != null && (!Number.isFinite(dailyCost) || dailyCost < 0)) {
+      setCreateEmployeeError('日成本必须是非负数。');
+      return;
+    }
+    const request: EmployeeCreateRequest = {
+      tenant_id: currentUser.tenant_id,
+      user_id: createEmployeeForm.userId,
+      employee_no: createEmployeeForm.employeeNo.trim() || null,
+      department_id: createEmployeeForm.departmentId || null,
+      job_title: createEmployeeForm.jobTitle.trim() || null,
+      business_role: createEmployeeForm.businessRole,
+      level: createEmployeeForm.level.trim() || null,
+      skills: createEmployeeForm.skills.split(/[，,]/).map((skill) => skill.trim()).filter(Boolean),
+      capacity_percent: capacity,
+      daily_cost: dailyCost,
+      manager_user_id: createEmployeeForm.managerUserId || null,
+      assistant_agent_id: createEmployeeForm.assistantAgentId || null,
+    };
+    setEmployeeCreating(true);
+    setCreateEmployeeError('');
+    try {
+      await workbenchApi.createEmployee(request);
+      setCreateEmployeeOpen(false);
+      setRefreshKey((value) => value + 1);
+      notify.success('员工档案创建成功');
+    } catch (caught) {
+      let message = caught instanceof Error ? caught.message : '员工档案创建失败';
+      if (caught instanceof ApiError && caught.status === 403) {
+        message = '当前账号无权创建员工档案。';
+      } else if (caught instanceof ApiError && caught.status === 409) {
+        message = '该账号已有员工档案，已刷新组织数据。';
+        setRefreshKey((value) => value + 1);
+      } else if (caught instanceof ApiError && caught.status === 422) {
+        message = '员工档案信息不符合要求，请检查后重试。';
+      }
+      setCreateEmployeeError(message);
+      notify.error(message);
+    } finally {
+      setEmployeeCreating(false);
+    }
+  }
+
+  function openManagerDialog(department: DepartmentRead) {
+    setManagerDepartment(department);
+    setManagerUserId(employees.some((employee) => (
+      employee.user_id === department.manager_user_id
+      && employee.status === 'active'
+      && employee.department_id === department.id
+    )) ? department.manager_user_id || '' : '');
+    setManagerError('');
+  }
+
+  async function appointDepartmentManager(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!managerDepartment || !managerUserId) {
+      setManagerError('请选择一名本部门在岗员工。');
+      return;
+    }
+    const candidate = employees.find((employee) => employee.user_id === managerUserId);
+    if (!candidate || candidate.status !== 'active' || candidate.department_id !== managerDepartment.id) {
+      setManagerError('所选员工已不在当前部门，请刷新后重试。');
+      return;
+    }
+    setManagerSaving(true);
+    setManagerError('');
+    try {
+      if (candidate.business_role === 'member') {
+        await workbenchApi.updateEmployee(candidate.id, {
+          tenant_id: currentUser.tenant_id,
+          business_role: 'manager',
+        });
+      }
+      await workbenchApi.updateDepartment(managerDepartment.id, {
+        tenant_id: currentUser.tenant_id,
+        manager_user_id: candidate.user_id,
+      });
+      setManagerDepartment(null);
+      setRefreshKey((value) => value + 1);
+      notify.success('部门负责人任命成功');
+    } catch (caught) {
+      setRefreshKey((value) => value + 1);
+      const message = caught instanceof ApiError && caught.status === 403
+        ? '当前账号无权任命该部门负责人。'
+        : caught instanceof ApiError && caught.status === 422
+          ? '所选员工不符合部门负责人任命条件。'
+          : caught instanceof Error ? caught.message : '部门负责人任命失败';
+      setManagerError(message);
+      notify.error(message);
+    } finally {
+      setManagerSaving(false);
+    }
   }
 
   async function createDepartment(event: FormEvent<HTMLFormElement>) {
@@ -410,11 +591,14 @@ export default function OrganizationPage({
       currentUser={currentUser}
       onLogout={onLogout}
       actions={canManageAll && canShowMutations ? (
-        <div className="flex items-center gap-[8px]">
+        <div className="flex flex-wrap items-center gap-[8px]">
+          <Button type="button" onClick={openCreateEmployeeDialog} className="h-[34px] gap-[6px] rounded-[10px] bg-[#18181a] px-[13px] text-[12px] text-white hover:bg-[#303030]">
+            <UserPlus className="size-[14px]" aria-hidden="true" />手工建档
+          </Button>
           <Button type="button" variant="outline" onClick={openImportDialog} className="h-[34px] gap-[6px] rounded-[10px] border-[#dce2ec] bg-white px-[13px] text-[12px] font-normal text-[#596176] hover:bg-[#f6f7f9]">
             <FileSpreadsheet className="size-[14px]" aria-hidden="true" />导入员工
           </Button>
-          <Button type="button" onClick={openDepartmentDialog} className="h-[34px] gap-[6px] rounded-[10px] bg-[#18181a] px-[13px] text-[12px] text-white hover:bg-[#303030]">
+          <Button type="button" variant="outline" onClick={openDepartmentDialog} className="h-[34px] gap-[6px] rounded-[10px] border-[#dce2ec] bg-white px-[13px] text-[12px] font-normal text-[#596176] hover:bg-[#f6f7f9]">
             <Plus className="size-[14px]" aria-hidden="true" />新建部门
           </Button>
         </div>
@@ -449,6 +633,33 @@ export default function OrganizationPage({
               </label>
             </div>
           </section>
+
+          {canManageAll && (
+            <section aria-label="部门负责人管理" className="rounded-[16px] border border-[#edf0f5] bg-white p-[16px] shadow-[0_8px_24px_rgba(24,30,46,0.035)]">
+              <div>
+                <h2 className="m-0 text-[15px] font-semibold text-[#24262d]">部门负责人</h2>
+                <p className="mt-[4px] mb-0 text-[11px] text-[#858b9c]">任命会同步业务角色，并以部门记录作为真实权限来源。</p>
+              </div>
+              {activeDepartments.length ? (
+                <div className="mt-[13px] grid gap-[10px] sm:grid-cols-2 xl:grid-cols-3">
+                  {activeDepartments.map((department) => {
+                    const manager = employeeByUserId.get(department.manager_user_id || '');
+                    return (
+                      <article key={department.id} className="flex min-w-0 items-center justify-between gap-[12px] rounded-[12px] border border-[#edf0f5] px-[13px] py-[11px]">
+                        <div className="min-w-0">
+                          <h3 className="m-0 truncate text-[12px] font-semibold text-[#464c5e]">{department.name}</h3>
+                          <p className="mt-[4px] mb-0 truncate text-[10px] text-[#858b9c]">负责人：{manager ? employeeName(manager) : department.manager_user_id ? '账号尚未建档' : '尚未任命'}</p>
+                        </div>
+                        <Button type="button" variant="outline" aria-label={`任命${department.name}负责人`} onClick={() => openManagerDialog(department)} className="h-[29px] shrink-0 rounded-[8px] border-[#dce2ec] px-[9px] text-[10px] text-[#596176]">
+                          任命
+                        </Button>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : <p className="mt-[12px] mb-0 text-[11px] text-[#9aa1b3]">还没有可任命负责人的在用部门。</p>}
+            </section>
+          )}
 
           <section className="min-w-0 rounded-[16px] border border-[#edf0f5] bg-white p-[16px] shadow-[0_8px_24px_rgba(24,30,46,0.035)]">
             <div className="mb-[14px] flex items-center justify-between gap-[12px]">
@@ -491,13 +702,41 @@ export default function OrganizationPage({
         </DialogContent>
       </Dialog>
 
+      <CreateEmployeeDialog
+        open={createEmployeeOpen}
+        form={createEmployeeForm}
+        candidates={profileCandidates}
+        departments={activeDepartments}
+        employees={employees}
+        assistants={visibleAssistants}
+        loadingCandidates={tenantUsersLoading}
+        candidateError={tenantUsersError}
+        saving={employeeCreating}
+        error={createEmployeeError}
+        onOpenChange={(open) => !employeeCreating && setCreateEmployeeOpen(open)}
+        onChange={setCreateEmployeeForm}
+        onRetryCandidates={() => void loadTenantUsers()}
+        onSubmit={createEmployee}
+      />
+
+      <DepartmentManagerDialog
+        department={managerDepartment}
+        managerUserId={managerUserId}
+        candidates={managerCandidates}
+        saving={managerSaving}
+        error={managerError}
+        onManagerChange={setManagerUserId}
+        onClose={() => !managerSaving && setManagerDepartment(null)}
+        onSubmit={appointDepartmentManager}
+      />
+
       <EmployeeEditor
         employee={editingEmployee}
         form={editForm}
         departments={activeDepartments}
         employees={employees}
         assistants={visibleAssistants}
-        canAssignGlobalRole={canManageAll}
+        canAssignCeo={canManageAll}
         saving={employeeSaving}
         error={employeeError}
         onChange={setEditForm}
@@ -567,13 +806,140 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function CreateEmployeeDialog({
+  open,
+  form,
+  candidates,
+  departments,
+  employees,
+  assistants,
+  loadingCandidates,
+  candidateError,
+  saving,
+  error,
+  onOpenChange,
+  onChange,
+  onRetryCandidates,
+  onSubmit,
+}: {
+  open: boolean;
+  form: CreateEmployeeForm;
+  candidates: TenantUserRead[];
+  departments: DepartmentRead[];
+  employees: EmployeeRead[];
+  assistants: AgentProfileRead[];
+  loadingCandidates: boolean;
+  candidateError: string;
+  saving: boolean;
+  error: string;
+  onOpenChange: (open: boolean) => void;
+  onChange: (form: CreateEmployeeForm) => void;
+  onRetryCandidates: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const set = <K extends keyof CreateEmployeeForm>(key: K, value: CreateEmployeeForm[K]) => {
+    onChange({ ...form, [key]: value });
+  };
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] flex-col gap-0 overflow-hidden rounded-[16px] p-0 sm:max-w-[680px]">
+        <div className="shrink-0 border-b border-[#edf0f5] px-[24px] py-[18px]">
+          <DialogTitle className="text-[16px] font-semibold text-[#24262d]">手工创建员工档案</DialogTitle>
+          <DialogDescription className="mt-[6px] text-[12px] leading-[19px] text-[#858b9c]">从当前租户尚未建档的账号中选择真人员工；系统管理员权限仍在账号层维护。</DialogDescription>
+        </div>
+        <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">
+          <div className="grid min-h-0 flex-1 gap-[16px] overflow-y-auto px-[24px] py-[20px] sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              {loadingCandidates ? (
+                <p role="status" className="m-0 rounded-[10px] bg-[#f2f5fa] px-[12px] py-[10px] text-[11px] text-[#596176]">正在加载同租户账号…</p>
+              ) : candidateError ? (
+                <div role="alert" className="flex flex-wrap items-center justify-between gap-[8px] rounded-[10px] bg-[#fce7e7] px-[12px] py-[9px] text-[11px] text-[#d20b0b]">
+                  <span>{candidateError}</span>
+                  <Button type="button" variant="outline" onClick={onRetryCandidates} className="h-[28px] rounded-[7px] border-[#e9bbbb] px-[9px] text-[10px]">重试</Button>
+                </div>
+              ) : candidates.length === 0 ? (
+                <p className="m-0 rounded-[10px] bg-[#f2f5fa] px-[12px] py-[10px] text-[11px] text-[#596176]">所有同租户账号都已建立员工档案。</p>
+              ) : (
+                <Field label="关联账号">
+                  <NativeSelect value={form.userId} onChange={(value) => set('userId', value)}>
+                    <option value="">请选择账号</option>
+                    {candidates.map((account) => <option key={account.id} value={account.id}>{account.display_name || account.username}（{account.username}）{account.role === 'admin' ? ' · 账号管理员' : ''}</option>)}
+                  </NativeSelect>
+                </Field>
+              )}
+            </div>
+            <Field label="员工工号"><Input value={form.employeeNo} onChange={(event) => set('employeeNo', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
+            <Field label="岗位"><Input value={form.jobTitle} onChange={(event) => set('jobTitle', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
+            <Field label="所属部门"><NativeSelect value={form.departmentId} onChange={(value) => set('departmentId', value)}><option value="">未分配</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</NativeSelect></Field>
+            <Field label="业务角色"><NativeSelect value={form.businessRole} onChange={(value) => set('businessRole', value as AssignableBusinessRole)}><option value="member">普通员工</option><option value="manager">部门负责人</option><option value="ceo">CEO</option></NativeSelect></Field>
+            <Field label="职级"><Input value={form.level} onChange={(event) => set('level', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
+            <Field label="技能（逗号分隔）"><Input value={form.skills} onChange={(event) => set('skills', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
+            <Field label="可用率"><Input type="number" min="0" max="100" value={form.capacityPercent} onChange={(event) => set('capacityPercent', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
+            <Field label="日成本"><Input type="number" min="0" step="0.01" value={form.dailyCost} onChange={(event) => set('dailyCost', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
+            <Field label="直属经理"><NativeSelect value={form.managerUserId} onChange={(value) => set('managerUserId', value)}><option value="">未设置</option>{employees.filter((employee) => employee.status === 'active').map((employee) => <option key={employee.user_id} value={employee.user_id}>{employeeName(employee)}</option>)}</NativeSelect></Field>
+            <Field label="AI 助理关联"><NativeSelect value={form.assistantAgentId} onChange={(value) => set('assistantAgentId', value)}><option value="">不关联</option>{assistants.map((assistant) => <option key={assistant.id} value={assistant.id}>{assistant.name}</option>)}</NativeSelect></Field>
+            {error && <p role="alert" className="m-0 text-[12px] text-[#d20b0b] sm:col-span-2">{error}</p>}
+          </div>
+          <DialogFooter className={`${DIALOG_FOOTER_CLASS} shrink-0 border-t border-[#edf0f5]`}>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saving} className={DIALOG_CANCEL_BUTTON_CLASS}>取消</Button>
+            <Button type="submit" disabled={saving || loadingCandidates || Boolean(candidateError) || candidates.length === 0 || !candidates.some((account) => account.id === form.userId)} className={DIALOG_PRIMARY_BUTTON_CLASS}>{saving ? '创建中…' : '创建员工档案'}</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DepartmentManagerDialog({
+  department,
+  managerUserId,
+  candidates,
+  saving,
+  error,
+  onManagerChange,
+  onClose,
+  onSubmit,
+}: {
+  department: DepartmentRead | null;
+  managerUserId: string;
+  candidates: EmployeeRead[];
+  saving: boolean;
+  error: string;
+  onManagerChange: (userId: string) => void;
+  onClose: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <Dialog open={Boolean(department)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="w-[calc(100%-32px)] gap-0 overflow-hidden rounded-[16px] p-0 sm:max-w-[460px]">
+        <div className="border-b border-[#edf0f5] px-[24px] py-[18px]">
+          <DialogTitle className="text-[16px] font-semibold text-[#24262d]">任命部门负责人</DialogTitle>
+          <DialogDescription className="mt-[6px] text-[12px] text-[#858b9c]">{department ? `为${department.name}选择一名本部门在岗真人员工。` : '选择本部门在岗真人员工。'}</DialogDescription>
+        </div>
+        <form onSubmit={onSubmit}>
+          <div className="grid gap-[14px] px-[24px] py-[20px]">
+            {candidates.length ? (
+              <Field label="部门负责人"><NativeSelect value={managerUserId} onChange={onManagerChange}><option value="">请选择员工</option>{candidates.map((employee) => <option key={employee.user_id} value={employee.user_id}>{employeeName(employee)} · {employee.job_title || '岗位未设置'}</option>)}</NativeSelect></Field>
+            ) : <p className="m-0 rounded-[10px] bg-[#f2f5fa] px-[12px] py-[10px] text-[11px] text-[#596176]">本部门暂无可任命的在岗员工。</p>}
+            {error && <p role="alert" className="m-0 text-[12px] text-[#d20b0b]">{error}</p>}
+          </div>
+          <DialogFooter className={`${DIALOG_FOOTER_CLASS} border-t border-[#edf0f5]`}>
+            <Button type="button" variant="outline" onClick={onClose} disabled={saving} className={DIALOG_CANCEL_BUTTON_CLASS}>取消</Button>
+            <Button type="submit" disabled={saving || !managerUserId || candidates.length === 0} className={DIALOG_PRIMARY_BUTTON_CLASS}>{saving ? '任命中…' : '确认任命'}</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function EmployeeEditor({
   employee,
   form,
   departments,
   employees,
   assistants,
-  canAssignGlobalRole,
+  canAssignCeo,
   saving,
   error,
   onChange,
@@ -585,7 +951,7 @@ function EmployeeEditor({
   departments: DepartmentRead[];
   employees: EmployeeRead[];
   assistants: AgentProfileRead[];
-  canAssignGlobalRole: boolean;
+  canAssignCeo: boolean;
   saving: boolean;
   error: string;
   onChange: (form: EmployeeForm | null) => void;
@@ -609,7 +975,7 @@ function EmployeeEditor({
               <Field label="岗位"><Input value={form.jobTitle} onChange={(event) => set('jobTitle', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
               <Field label="所属部门"><NativeSelect value={form.departmentId} onChange={(value) => set('departmentId', value)}><option value="">未分配</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</NativeSelect></Field>
               <Field label="职级"><Input value={form.level} onChange={(event) => set('level', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
-              <Field label="业务角色"><NativeSelect value={form.businessRole} onChange={(value) => set('businessRole', value as BusinessRole)}><option value="member">普通员工</option><option value="manager">部门负责人</option>{canAssignGlobalRole && <option value="ceo">CEO</option>}{canAssignGlobalRole && <option value="admin">管理员</option>}</NativeSelect></Field>
+              <Field label="业务角色"><NativeSelect value={form.businessRole} onChange={(value) => set('businessRole', value as AssignableBusinessRole)}><option value="member">普通员工</option><option value="manager">部门负责人</option>{canAssignCeo && <option value="ceo">CEO</option>}</NativeSelect></Field>
               <Field label="状态"><NativeSelect value={form.status} onChange={(value) => set('status', value as EmployeeStatus)}><option value="active">在岗</option><option value="inactive">停用</option></NativeSelect></Field>
               <Field label="技能（逗号分隔）"><Input value={form.skills} onChange={(event) => set('skills', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>
               <Field label="可用率"><Input type="number" min="0" max="100" value={form.capacityPercent} onChange={(event) => set('capacityPercent', event.target.value)} className="h-[36px] rounded-[10px] border-[#e3e7f1] text-[13px]" /></Field>

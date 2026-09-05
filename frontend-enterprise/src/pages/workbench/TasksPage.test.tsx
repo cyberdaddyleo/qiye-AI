@@ -338,7 +338,7 @@ describe('TasksPage', () => {
     expect(within(dialog).getByText('高优先级')).toBeTruthy();
     expect(screen.getByRole('button', { name: '查看依赖 完成定位研究' })).toBeTruthy();
     expect(screen.getByText('交付内容通过负责人验收')).toBeTruthy();
-    expect(screen.getByText('已完成第一版交付')).toBeTruthy();
+    expect(screen.getAllByText('已完成第一版交付')).toHaveLength(2);
     expect(screen.getAllByText('请补充关键数据来源')).toHaveLength(2);
 
     const timeline = screen.getByRole('list', { name: '任务动态' });
@@ -390,11 +390,12 @@ describe('TasksPage', () => {
     expect(within(dialog).queryByText('审核人信息受限')).toBeNull();
   });
 
-  it('lets an assignee start, comment, and submit while refetching detail and list after each mutation', async () => {
+  it('lets an assignee start, comment, update progress, and submit referenced artifacts with fresh versions', async () => {
     const backlog = task('backlog', 'task-personal', '整理访谈结论', { version: 2 });
     const inProgressV3 = { ...backlog, status: 'in_progress' as const, version: 3 };
     const inProgressV4 = { ...inProgressV3, version: 4 };
-    const reviewV5 = { ...inProgressV4, status: 'review' as const, version: 5 };
+    const inProgressV5 = { ...inProgressV4, progress: 70, version: 5 };
+    const reviewV6 = { ...inProgressV5, status: 'review' as const, version: 6 };
     vi.mocked(workbenchApi.getAccess).mockResolvedValue(memberAccess);
     vi.mocked(workbenchApi.listEmployees).mockRejectedValue(
       new ApiError(403, '{"detail":"Cannot list employees"}', 'Forbidden'),
@@ -403,12 +404,14 @@ describe('TasksPage', () => {
       .mockResolvedValueOnce([backlog])
       .mockResolvedValueOnce([inProgressV3])
       .mockResolvedValueOnce([inProgressV4])
-      .mockResolvedValueOnce([reviewV5]);
+      .mockResolvedValueOnce([inProgressV5])
+      .mockResolvedValueOnce([reviewV6]);
     vi.mocked(workbenchApi.getTask)
       .mockResolvedValueOnce(backlog)
       .mockResolvedValueOnce(inProgressV3)
       .mockResolvedValueOnce(inProgressV4)
-      .mockResolvedValueOnce(reviewV5);
+      .mockResolvedValueOnce(inProgressV5)
+      .mockResolvedValueOnce(reviewV6);
     const user = userEvent.setup();
     renderTasks(member);
 
@@ -430,17 +433,139 @@ describe('TasksPage', () => {
     });
     expect(screen.getByLabelText('添加评论')).toHaveProperty('value', '');
 
+    await user.clear(screen.getByLabelText('任务进度'));
+    await user.type(screen.getByLabelText('任务进度'), '70');
+    await user.click(screen.getByRole('button', { name: '保存进度' }));
+    expect(workbenchApi.updateTask).toHaveBeenLastCalledWith(backlog.id, {
+      tenant_id: member.tenant_id,
+      version: 4,
+      progress: 70,
+    });
+
     await user.type(screen.getByLabelText('成果摘要'), '形成洞察报告与原始记录');
+    await user.type(screen.getByLabelText('成果引用 1'), 'https://example.com/research-report');
+    await user.click(screen.getByRole('button', { name: '添加成果引用' }));
+    await user.type(screen.getByLabelText('成果引用 2'), 'resource-user-research-42');
     await user.click(screen.getByRole('button', { name: '提交成果' }));
     expect(workbenchApi.submitTask).toHaveBeenCalledWith(backlog.id, {
       tenant_id: member.tenant_id,
-      version: 4,
+      version: 5,
       result_summary: '形成洞察报告与原始记录',
-      artifact_refs: [],
+      artifact_refs: ['https://example.com/research-report', 'resource-user-research-42'],
     });
 
-    expect(workbenchApi.getTask).toHaveBeenCalledTimes(4);
-    expect(workbenchApi.listTasks).toHaveBeenCalledTimes(4);
+    expect(workbenchApi.getTask).toHaveBeenCalledTimes(5);
+    expect(workbenchApi.listTasks).toHaveBeenCalledTimes(5);
+  });
+
+  it('refreshes the latest progress and version after a 409 progress conflict', async () => {
+    const initial = task('in_progress', 'task-progress-conflict', '进度冲突任务', {
+      version: 9,
+      progress: 40,
+    });
+    const fresh = { ...initial, version: 10, progress: 65 };
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(memberAccess);
+    vi.mocked(workbenchApi.listEmployees).mockRejectedValue(
+      new ApiError(403, '{"detail":"Cannot list employees"}', 'Forbidden'),
+    );
+    vi.mocked(workbenchApi.listTasks)
+      .mockResolvedValueOnce([initial])
+      .mockResolvedValueOnce([fresh]);
+    vi.mocked(workbenchApi.getTask)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(fresh);
+    vi.mocked(workbenchApi.updateTask).mockRejectedValueOnce(
+      new ApiError(409, '{"detail":"Task version conflict"}', 'Conflict'),
+    );
+    const user = userEvent.setup();
+    renderTasks(member);
+
+    await user.click(await screen.findByRole('button', { name: '打开任务 进度冲突任务' }));
+    const progress = screen.getByLabelText('任务进度');
+    await user.clear(progress);
+    await user.type(progress, '80');
+    await user.click(screen.getByRole('button', { name: '保存进度' }));
+
+    expect(workbenchApi.updateTask).toHaveBeenCalledWith(initial.id, {
+      tenant_id: member.tenant_id,
+      version: 9,
+      progress: 80,
+    });
+    expect(await screen.findByText(/任务版本冲突，已刷新最新状态/)).toBeTruthy();
+    expect(progress).toHaveProperty('value', '65');
+    expect(screen.getByText('版本 10')).toBeTruthy();
+  });
+
+  it('shows prior artifact references and reuses them for a returned-task resubmission', async () => {
+    const priorSubmission: WorkTaskEventRead = {
+      ...eventComment,
+      id: 'event-result-prior',
+      event_type: 'result_submitted',
+      payload: {
+        result_summary: '第一版成果',
+        artifact_refs: ['https://example.com/first-report', 'resource-first-42'],
+      },
+      created_at: '2026-09-03T09:30:00Z',
+    };
+    const returned = task('in_progress', 'task-returned-result', '重新提交研究成果', {
+      version: 6,
+      result_summary: '第一版成果',
+      events: [priorSubmission, eventReturned],
+    });
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(memberAccess);
+    vi.mocked(workbenchApi.listEmployees).mockRejectedValue(
+      new ApiError(403, '{"detail":"Cannot list employees"}', 'Forbidden'),
+    );
+    vi.mocked(workbenchApi.listTasks).mockResolvedValue([returned]);
+    vi.mocked(workbenchApi.getTask).mockResolvedValue(returned);
+    const user = userEvent.setup();
+    renderTasks(member);
+
+    await user.click(await screen.findByRole('button', { name: '打开任务 重新提交研究成果' }));
+    expect(screen.getByRole('link', { name: 'https://example.com/first-report' })).toHaveProperty('href', 'https://example.com/first-report');
+    expect(screen.getByText('resource-first-42')).toBeTruthy();
+    expect(screen.getByLabelText('成果摘要')).toHaveProperty('value', '第一版成果');
+    expect(screen.getByLabelText('成果引用 1')).toHaveProperty('value', 'https://example.com/first-report');
+    expect(screen.getByLabelText('成果引用 2')).toHaveProperty('value', 'resource-first-42');
+    await user.click(screen.getByRole('button', { name: '重新提交成果' }));
+
+    expect(workbenchApi.submitTask).toHaveBeenCalledWith(returned.id, {
+      tenant_id: member.tenant_id,
+      version: 6,
+      result_summary: '第一版成果',
+      artifact_refs: ['https://example.com/first-report', 'resource-first-42'],
+    });
+  });
+
+  it.each(['review', 'done', 'canceled'] as const)('does not expose execution mutations for %s tasks', async (status) => {
+    const immutable = task(status, `task-no-execute-${status}`, `${status} 不可执行`);
+    vi.mocked(workbenchApi.getAccess).mockResolvedValue(memberAccess);
+    vi.mocked(workbenchApi.listEmployees).mockRejectedValue(
+      new ApiError(403, '{"detail":"Cannot list employees"}', 'Forbidden'),
+    );
+    vi.mocked(workbenchApi.listTasks).mockResolvedValue([immutable]);
+    vi.mocked(workbenchApi.getTask).mockResolvedValue(immutable);
+    const user = userEvent.setup();
+    renderTasks(member);
+
+    await user.click(await screen.findByRole('button', { name: `打开任务 ${immutable.title}` }));
+    await screen.findByRole('dialog');
+    expect(screen.queryByLabelText('任务进度')).toBeNull();
+    expect(screen.queryByRole('button', { name: '保存进度' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /提交成果/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: '开始任务' })).toBeNull();
+    cleanup();
+  });
+
+  it('opens a task detail from the supported task_id query parameter', async () => {
+    const linked = task('review', 'task-linked-review', '驾驶舱直达任务');
+    vi.mocked(workbenchApi.listTasks).mockResolvedValue([linked]);
+    vi.mocked(workbenchApi.getTask).mockResolvedValue(linked);
+
+    renderTasks(manager, `/enterprise/tasks?task_id=${linked.id}`);
+
+    expect(await screen.findByRole('dialog', { name: linked.title })).toBeTruthy();
+    expect(workbenchApi.getTask).toHaveBeenCalledWith(linked.id, manager.tenant_id);
   });
 
   it('lets a manager approve or return submitted work with a reviewer comment', async () => {
@@ -625,10 +750,13 @@ describe('TasksPage', () => {
     renderTasks(member);
     await user.click(await screen.findByRole('button', { name: '打开任务 提交被拒任务' }));
     const summary = screen.getByLabelText('成果摘要');
+    const artifactRef = screen.getByLabelText('成果引用 1');
     await user.type(summary, '不能丢失的成果摘要');
+    await user.type(artifactRef, 'resource-draft-must-survive');
     await user.click(screen.getByRole('button', { name: '提交成果' }));
     expect(await screen.findByText(/操作被拒绝/)).toBeTruthy();
     expect(summary).toHaveProperty('value', '不能丢失的成果摘要');
+    expect(artifactRef).toHaveProperty('value', 'resource-draft-must-survive');
     cleanup();
 
     const submitted = task('review', 'task-review-conflict-draft', '审核冲突任务', {
@@ -729,6 +857,12 @@ describe('MyWorkPage', () => {
     vi.mocked(workbenchApi.getTask).mockResolvedValue(
       task('in_progress', 'task-today', '整理今日访谈', { due_date: '2026-09-05' }),
     );
+    vi.mocked(workbenchApi.updateTask).mockResolvedValue(
+      task('in_progress', 'task-today', '整理今日访谈', { progress: 55, version: 3 }),
+    );
+    vi.mocked(workbenchApi.submitTask).mockResolvedValue(
+      task('review', 'task-today', '整理今日访谈', { version: 4 }),
+    );
   });
 
   afterEach(() => {
@@ -758,6 +892,45 @@ describe('MyWorkPage', () => {
     await user.click(screen.getByRole('button', { name: '打开任务 整理今日访谈' }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(screen.getByRole('button', { name: '提交成果' })).toBeTruthy();
+  });
+
+  it('wires progress and artifact resubmission through My Work with current task versions', async () => {
+    const initial = task('in_progress', 'task-my-work-execution', '完成执行闭环', {
+      progress: 20,
+      version: 2,
+    });
+    const progressed = { ...initial, progress: 55, version: 3 };
+    const submitted = { ...progressed, status: 'review' as const, version: 4 };
+    vi.mocked(workbenchApi.listTasks)
+      .mockResolvedValueOnce([initial])
+      .mockResolvedValueOnce([progressed])
+      .mockResolvedValueOnce([submitted]);
+    vi.mocked(workbenchApi.getTask)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(progressed)
+      .mockResolvedValueOnce(submitted);
+    const user = userEvent.setup();
+    renderMyWork();
+
+    await user.click(await screen.findByRole('button', { name: '打开任务 完成执行闭环' }));
+    await user.clear(screen.getByLabelText('任务进度'));
+    await user.type(screen.getByLabelText('任务进度'), '55');
+    await user.click(screen.getByRole('button', { name: '保存进度' }));
+    expect(workbenchApi.updateTask).toHaveBeenCalledWith(initial.id, {
+      tenant_id: member.tenant_id,
+      version: 2,
+      progress: 55,
+    });
+
+    await user.type(screen.getByLabelText('成果摘要'), '执行闭环已完成');
+    await user.type(screen.getByLabelText('成果引用 1'), 'asset-my-work-1');
+    await user.click(screen.getByRole('button', { name: '提交成果' }));
+    expect(workbenchApi.submitTask).toHaveBeenCalledWith(initial.id, {
+      tenant_id: member.tenant_id,
+      version: 3,
+      result_summary: '执行闭环已完成',
+      artifact_refs: ['asset-my-work-1'],
+    });
   });
 
   it('shows a useful empty state and distinguishes permission failures', async () => {
