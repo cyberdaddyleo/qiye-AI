@@ -486,7 +486,9 @@ def test_dispatch_rejects_invalid_task_sets_graph_dates_and_assignees(
         db.commit()
         outsider_id = outsider.id
 
-    for index, assignee_id in enumerate((users["member"].id, outsider_id)):
+    for index, (assignee_id, expected_status) in enumerate(
+        ((users["member"].id, 422), (outsider_id, 404))
+    ):
         tasks = [dict(task) for task in base]
         tasks[0]["assignee_user_id"] = assignee_id
         response = client.post(
@@ -499,7 +501,7 @@ def test_dispatch_rejects_invalid_task_sets_graph_dates_and_assignees(
                 "tasks": tasks,
             },
         )
-        assert response.status_code == 422, response.text
+        assert response.status_code == expected_status, response.text
 
 
 def test_member_project_owner_can_preview_and_dispatch(

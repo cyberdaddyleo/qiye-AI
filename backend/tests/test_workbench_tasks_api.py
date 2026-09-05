@@ -239,7 +239,7 @@ def test_transition_graph_and_audited_submit_review_workflow() -> None:
 
         progressed = client.put(
             f"/api/enterprise/workbench/tasks/{task['id']}",
-            headers=_headers(rows["manager"]),
+            headers=_headers(rows["member"]),
             json={"tenant_id": "tenant_a", "version": 1, "progress": 60},
         )
         assert progressed.status_code == 200, progressed.text
@@ -354,12 +354,12 @@ def test_review_return_and_manager_actions_follow_state_machine() -> None:
         task = _create_task(client, rows, project["id"], "Draft plan")
         started = client.put(
             f"/api/enterprise/workbench/tasks/{task['id']}",
-            headers=_headers(rows["manager"]),
+            headers=_headers(rows["member"]),
             json={"tenant_id": "tenant_a", "version": 0, "status": "in_progress"},
         ).json()
         submitted = client.post(
             f"/api/enterprise/workbench/tasks/{task['id']}/submit",
-            headers=_headers(rows["manager"]),
+            headers=_headers(rows["member"]),
             json={
                 "tenant_id": "tenant_a",
                 "version": started["version"],
@@ -684,7 +684,7 @@ def test_generic_update_handles_manual_unblock_cancel_and_illegal_transitions() 
         app.dependency_overrides.clear()
 
 
-def test_dependency_edits_do_not_rewrite_active_or_terminal_state() -> None:
+def test_dependency_edits_allow_active_execution_but_freeze_review_and_terminal_state() -> None:
     client, engine, rows = _client_and_rows()
     try:
         project = _create_project(client, rows)
@@ -721,9 +721,20 @@ def test_dependency_edits_do_not_rewrite_active_or_terminal_state() -> None:
                     "dependencies": [dependency["id"]],
                 },
             )
-            assert response.status_code == 200, response.text
-            assert response.json()["status"] == status
-            assert response.json()["completed_at"] == before["completed_at"]
+            if status == "in_progress":
+                assert response.status_code == 200, response.text
+                assert response.json()["status"] == status
+                assert response.json()["completed_at"] == before["completed_at"]
+            else:
+                assert response.status_code == 422, response.text
+                after = client.get(
+                    f"/api/enterprise/workbench/tasks/{task_id}",
+                    params={"tenant_id": "tenant_a"},
+                    headers=_headers(rows["manager"]),
+                ).json()
+                assert after["status"] == before["status"]
+                assert after["version"] == before["version"]
+                assert after["dependencies"] == before["dependencies"]
     finally:
         app.dependency_overrides.clear()
 
@@ -880,7 +891,7 @@ def test_dashboard_includes_cross_department_assignment_review_and_owned_project
         for relation in ("assignee", "reviewer", "owner"):
             project_response = client.post(
                 "/api/enterprise/workbench/projects",
-                headers=_headers(rows["manager"]),
+                headers=_headers(rows["ceo"]),
                 json={
                     "tenant_id": "tenant_a",
                     "name": f"Cross department {relation}",
@@ -894,7 +905,7 @@ def test_dashboard_includes_cross_department_assignment_review_and_owned_project
             assert project_response.status_code == 201, project_response.text
             task_response = client.post(
                 "/api/enterprise/workbench/tasks",
-                headers=_headers(rows["manager"]),
+                headers=_headers(rows["ceo"]),
                 json={
                     "tenant_id": "tenant_a",
                     "project_id": project_response.json()["id"],

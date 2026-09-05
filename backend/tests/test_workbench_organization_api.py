@@ -119,7 +119,7 @@ def test_access_api_reports_server_derived_roles_and_project_capabilities() -> N
     rows = _seed(engine)
     client = _client(engine)
     expected = {
-        "admin": ("admin", "all", True, True, []),
+        "admin": ("admin", "all", False, True, []),
         "ceo": ("ceo", "all", True, True, []),
         "manager": (
             "manager",

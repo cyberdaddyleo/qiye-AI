@@ -18,6 +18,7 @@ from app.db.models import (
     EmployeeProfile,
     User,
     UserAvatar,
+    WorkPlan,
     WorkProject,
     WorkTask,
     WorkTaskEvent,
@@ -35,6 +36,8 @@ from app.workbench.permissions import (
     WorkbenchAccess,
     can_manage_employee,
     can_view_employee,
+    can_view_employee_sensitive,
+    project_colleague_user_ids,
     require_global_manager,
 )
 from app.workbench.schema import (
@@ -47,6 +50,7 @@ from app.workbench.schema import (
     WorkTaskEventRead,
 )
 from app.workbench.service import (
+    active_employee_for_user,
     add_task_comment,
     build_plan,
     create_employee,
@@ -57,18 +61,22 @@ from app.workbench.service import (
     department_for_tenant,
     dispatch_plan,
     employee_for_tenant,
-    ensure_plan_visible,
     ensure_task_visible,
     list_visible_projects,
     list_visible_tasks,
     plan_for_tenant,
+    plan_values_for_user,
     project_for_tenant,
     project_progress,
+    project_progresses,
     review_task,
     submit_task,
     task_dependencies,
+    task_dependencies_bulk,
     task_events,
+    task_events_bulk,
     task_for_tenant,
+    update_department,
     update_employee,
     update_project,
     update_task,
@@ -103,7 +111,7 @@ class EmployeeCreate(BaseModel):
     employee_no: str | None = None
     department_id: str | None = None
     job_title: str | None = None
-    business_role: Literal["admin", "ceo", "manager", "member"] = "member"
+    business_role: Literal["ceo", "manager", "member"] = "member"
     level: str | None = None
     skills: list[str] = Field(default_factory=list)
     capacity_percent: int = Field(default=100, ge=0, le=100)
@@ -117,7 +125,7 @@ class EmployeeUpdate(BaseModel):
     employee_no: str | None = None
     department_id: str | None = None
     job_title: str | None = None
-    business_role: Literal["admin", "ceo", "manager", "member"] | None = None
+    business_role: Literal["ceo", "manager", "member"] | None = None
     level: str | None = None
     skills: list[str] | None = None
     capacity_percent: int | None = Field(default=None, ge=0, le=100)
@@ -278,7 +286,12 @@ def _department_response(row: Department) -> DepartmentResponse:
     return DepartmentResponse.model_validate(row, from_attributes=True)
 
 
-def _employee_response(db: Session, row: EmployeeProfile) -> EmployeeResponse:
+def _employee_response(
+    db: Session,
+    row: EmployeeProfile,
+    *,
+    restricted: bool = False,
+) -> EmployeeResponse:
     user = user_for_tenant(db, row.tenant_id, row.user_id)
     avatar = db.get(UserAvatar, user.id)
     return EmployeeResponse(
@@ -292,16 +305,16 @@ def _employee_response(db: Session, row: EmployeeProfile) -> EmployeeResponse:
             if avatar
             else None
         ),
-        employee_no=row.employee_no,
+        employee_no=None if restricted else row.employee_no,
         department_id=row.department_id,
         job_title=row.job_title,
         business_role=row.business_role,
-        level=row.level,
-        skills=list(row.skills_json or []),
-        capacity_percent=row.capacity_percent,
-        daily_cost=row.daily_cost,
-        manager_user_id=row.manager_user_id,
-        assistant_agent_id=row.assistant_agent_id,
+        level=None if restricted else row.level,
+        skills=[] if restricted else list(row.skills_json or []),
+        capacity_percent=0 if restricted else row.capacity_percent,
+        daily_cost=None if restricted else row.daily_cost,
+        manager_user_id=None if restricted else row.manager_user_id,
+        assistant_agent_id=None if restricted else row.assistant_agent_id,
         status=row.status,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -321,19 +334,53 @@ def _event_response(row: WorkTaskEvent) -> WorkTaskEventRead:
     )
 
 
-def _task_response(db: Session, row: WorkTask) -> TaskRead:
+def _task_response(
+    db: Session,
+    row: WorkTask,
+    *,
+    dependencies: list[str] | None = None,
+    events: list[WorkTaskEvent] | None = None,
+) -> TaskRead:
     values = row.model_dump()
-    values["dependencies"] = task_dependencies(db, row)
-    values["events"] = [_event_response(event) for event in task_events(db, row)]
+    values["dependencies"] = (
+        task_dependencies(db, row) if dependencies is None else dependencies
+    )
+    values["events"] = [
+        _event_response(event)
+        for event in (task_events(db, row) if events is None else events)
+    ]
     return TaskRead.model_validate(values)
 
 
-def _plan_response(row: object) -> PlanRead:
-    return PlanRead.model_validate(row, from_attributes=True)
+def _task_responses(db: Session, rows: list[WorkTask]) -> list[TaskRead]:
+    dependencies = task_dependencies_bulk(db, rows)
+    events = task_events_bulk(db, rows)
+    return [
+        _task_response(
+            db,
+            row,
+            dependencies=dependencies[row.id],
+            events=events[row.id],
+        )
+        for row in rows
+    ]
+
+
+def _plan_response(db: Session, row: WorkPlan, actor_user_id: str) -> PlanRead:
+    values = plan_values_for_user(db, row, actor_user_id)
+    return PlanRead.model_validate(values, from_attributes=True)
 
 
 def _project_response(db: Session, row: WorkProject) -> dict[str, object]:
     return {**row.model_dump(), **project_progress(db, row)}
+
+
+def _project_responses(
+    db: Session,
+    rows: list[WorkProject],
+) -> list[dict[str, object]]:
+    progress = project_progresses(db, rows)
+    return [{**row.model_dump(), **progress[row.id]} for row in rows]
 
 
 def _access(db: Session, tenant_id: str, user: User) -> WorkbenchAccess:
@@ -348,7 +395,7 @@ def _ensure_department_manage(access: WorkbenchAccess, department_id: str | None
 
 
 def _ensure_global_role_assignment(access: WorkbenchAccess, business_role: str | None) -> None:
-    if business_role in {"admin", "ceo"} and not access.can_view_all:
+    if business_role == "ceo" and not access.can_manage_organization:
         raise HTTPException(
             status_code=403, detail="Only administrator or CEO can grant global employee roles"
         )
@@ -391,9 +438,8 @@ def list_projects_endpoint(
     current_user: User = Depends(get_current_user),
 ) -> list[dict[str, object]]:
     _access(db, tenant_id, current_user)
-    return [
-        _project_response(db, row) for row in list_visible_projects(db, tenant_id, current_user.id)
-    ]
+    rows = list_visible_projects(db, tenant_id, current_user.id)
+    return _project_responses(db, rows)
 
 
 @router.get("/projects/{project_id}")
@@ -434,7 +480,7 @@ def preview_plan_endpoint(
     current_user: User = Depends(get_current_user),
 ) -> PlanRead:
     _access(db, request.tenant_id, current_user)
-    return _plan_response(build_plan(db, request, current_user))
+    return _plan_response(db, build_plan(db, request, current_user), current_user.id)
 
 
 @router.get("/plans/{plan_id}", response_model=PlanRead)
@@ -446,8 +492,7 @@ def get_plan_endpoint(
 ) -> PlanRead:
     _access(db, tenant_id, current_user)
     row = plan_for_tenant(db, tenant_id, plan_id)
-    ensure_plan_visible(db, row, current_user.id)
-    return _plan_response(row)
+    return _plan_response(db, row, current_user.id)
 
 
 @router.post("/plans/{plan_id}/dispatch", response_model=list[TaskRead], status_code=201)
@@ -470,7 +515,7 @@ def dispatch_plan_endpoint(
     )
     if not getattr(rows, "created", False):
         response.status_code = 200
-    return [_task_response(db, row) for row in rows]
+    return _task_responses(db, list(rows))
 
 
 @router.post("/tasks", response_model=TaskRead, status_code=201)
@@ -496,14 +541,23 @@ def list_tasks_endpoint(
     status: Literal["backlog", "blocked", "in_progress", "review", "done", "canceled"]
     | None = Query(None),
     project_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> list[TaskRead]:
     _access(db, tenant_id, current_user)
     rows = list_visible_tasks(
-        db, tenant_id, current_user.id, scope, status=status, project_id=project_id
+        db,
+        tenant_id,
+        current_user.id,
+        scope,
+        status=status,
+        project_id=project_id,
+        limit=limit,
+        offset=offset,
     )
-    return [_task_response(db, row) for row in rows]
+    return _task_responses(db, rows)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskRead)
@@ -598,10 +652,12 @@ def dashboard_endpoint(
 ) -> dict[str, object]:
     _access(db, tenant_id, current_user)
     data = dashboard_for_user(db, tenant_id, current_user.id)
-    data["pending_reviews"] = [
-        _task_response(db, row).model_dump() for row in data["pending_reviews"]
-    ]
-    data["at_risk_tasks"] = [_task_response(db, row).model_dump() for row in data["at_risk_tasks"]]
+    pending_reviews = list(data["pending_reviews"])
+    at_risk_tasks = list(data["at_risk_tasks"])
+    detail_rows = list({row.id: row for row in [*pending_reviews, *at_risk_tasks]}.values())
+    detail_by_id = {row.id: detail for row, detail in zip(detail_rows, _task_responses(db, detail_rows))}
+    data["pending_reviews"] = [detail_by_id[row.id].model_dump() for row in pending_reviews]
+    data["at_risk_tasks"] = [detail_by_id[row.id].model_dump() for row in at_risk_tasks]
     data["recent_events"] = [_event_response(row).model_dump() for row in data["recent_events"]]
     return data
 
@@ -616,7 +672,16 @@ def create_department_endpoint(
     if request.parent_id:
         department_for_tenant(db, request.tenant_id, request.parent_id)
     if request.manager_user_id:
-        user_for_tenant(db, request.tenant_id, request.manager_user_id)
+        active_employee_for_user(
+            db,
+            request.tenant_id,
+            request.manager_user_id,
+            label="Department manager",
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="Create the department before assigning its manager",
+        )
     row = Department(**request.model_dump())
     db.add(row)
     db.commit()
@@ -671,15 +736,7 @@ def update_department_endpoint(
     values = request.model_dump(exclude_unset=True, exclude={"tenant_id"})
     if values.get("parent_id"):
         department_for_tenant(db, request.tenant_id, values["parent_id"])
-    if values.get("manager_user_id"):
-        user_for_tenant(db, request.tenant_id, values["manager_user_id"])
-    for key, value in values.items():
-        setattr(row, key, value)
-    row.updated_at = utc_now()
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return _department_response(row)
+    return _department_response(update_department(db, row, values))
 
 
 @router.delete("/departments/{department_id}", status_code=204)
@@ -691,10 +748,7 @@ def delete_department_endpoint(
 ) -> Response:
     require_global_manager(db, tenant_id, current_user.id)
     row = department_for_tenant(db, tenant_id, department_id)
-    row.status = "archived"
-    row.updated_at = utc_now()
-    db.add(row)
-    db.commit()
+    update_department(db, row, {"status": "archived"})
     return Response(status_code=204)
 
 
@@ -730,8 +784,29 @@ def list_employees(
             )
         ).all()
     else:
-        raise HTTPException(status_code=403, detail="Cannot list employees")
-    return [_employee_response(db, row) for row in rows]
+        colleague_ids = project_colleague_user_ids(db, tenant_id, current_user.id)
+        if not colleague_ids:
+            raise HTTPException(status_code=403, detail="Cannot list employees")
+        rows = db.exec(
+            select(EmployeeProfile).where(
+                EmployeeProfile.tenant_id == tenant_id,
+                EmployeeProfile.status == "active",
+                EmployeeProfile.user_id.in_(colleague_ids),
+            )
+        ).all()
+    can_view_sensitive = access.can_manage_organization
+    return [
+        _employee_response(
+            db,
+            row,
+            restricted=not (
+                can_view_sensitive
+                or row.user_id == current_user.id
+                or row.department_id in access.managed_department_ids
+            ),
+        )
+        for row in rows
+    ]
 
 
 @router.get("/employees/{employee_id}", response_model=EmployeeResponse)
@@ -745,7 +820,16 @@ def get_employee(
     row = employee_for_tenant(db, tenant_id, employee_id)
     if not can_view_employee(db, tenant_id, current_user.id, row):
         raise HTTPException(status_code=403, detail="Cannot view this employee")
-    return _employee_response(db, row)
+    return _employee_response(
+        db,
+        row,
+        restricted=not can_view_employee_sensitive(
+            db,
+            tenant_id,
+            current_user.id,
+            row,
+        ),
+    )
 
 
 @router.get("/employees/{employee_id}/avatar")
@@ -925,6 +1009,39 @@ def _import_row_error(db: Session, tenant_id: str, row: EmployeeImportRow) -> di
     ).first()
     if department is None:
         return {"code": "unknown_department", "message": "部门不存在"}
+    if row.business_role == "admin":
+        return {"code": "invalid_business_role", "message": "business_role is invalid"}
+    user = _user_by_username(db, tenant_id, row.username)
+    if row.business_role == "manager" and (
+        user is None or department.manager_user_id != user.id
+    ):
+        return {
+            "code": "manager_scope_required",
+            "message": "manager role requires department management",
+        }
+    if user is not None:
+        managed_department_ids = set(
+            db.exec(
+                select(Department.id).where(
+                    Department.tenant_id == tenant_id,
+                    Department.status == "active",
+                    Department.manager_user_id == user.id,
+                )
+            ).all()
+        )
+        if managed_department_ids and (
+            "business_role" in row.provided_fields
+            and row.business_role != "manager"
+        ):
+            return {
+                "code": "manager_role_required",
+                "message": "department manager must retain manager role",
+            }
+        if managed_department_ids and department.id not in managed_department_ids:
+            return {
+                "code": "manager_department_required",
+                "message": "department manager must remain in a managed department",
+            }
     if row.manager_username and _user_by_username(db, tenant_id, row.manager_username) is None:
         return {"code": "unknown_manager", "message": "负责人账号不存在"}
     if row.assistant_agent_id:
