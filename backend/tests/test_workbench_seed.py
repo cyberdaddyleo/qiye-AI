@@ -216,6 +216,69 @@ def _prewritten_seed_in_process(
         process_engine.dispose()
 
 
+def _external_prewritten_seed_in_process(
+    database_url: str,
+    write_locked: Any,
+    file_locked: Any,
+    results: Any,
+) -> None:
+    process_engine = create_engine(
+        database_url,
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    connection = process_engine.connect()
+    transaction = connection.begin()
+    try:
+        connection.execute(
+            Tenant.__table__.insert().values(
+                id="external_prewritten_transaction_marker",
+                name="External prewritten marker",
+            )
+        )
+        write_locked.set()
+        if not file_locked.wait(timeout=15):
+            raise RuntimeError("normal seed did not acquire its file lock")
+
+        with Session(bind=connection) as db:
+            started_at = time.monotonic()
+            try:
+                seed_quantxy_workbench(db)
+            except RuntimeError as exc:
+                elapsed = time.monotonic() - started_at
+                results.put(
+                    (
+                        "external_prewritten_rejected",
+                        str(exc),
+                        elapsed,
+                        connection.in_transaction(),
+                    )
+                )
+            else:
+                results.put(
+                    (
+                        "external_prewritten_error",
+                        "seed unexpectedly succeeded",
+                        None,
+                        connection.in_transaction(),
+                    )
+                )
+    except Exception as exc:  # noqa: BLE001 - report child failures to the parent process
+        results.put(
+            (
+                "external_prewritten_error",
+                f"{type(exc).__name__}: {exc}",
+                None,
+                connection.in_transaction(),
+            )
+        )
+        write_locked.set()
+    finally:
+        if transaction.is_active:
+            transaction.rollback()
+        connection.close()
+        process_engine.dispose()
+
+
 def _locked_normal_seed_in_process(
     database_url: str,
     write_locked: Any,
@@ -375,6 +438,119 @@ def test_demo_seed_serializes_spawned_processes_using_real_and_symlink_urls(
     )
     assert canonical_lock_path.is_file()
     assert not symlink_lock_path.exists()
+
+
+def test_sqlite_seed_lock_uses_the_url_database_not_its_query(tmp_path: Path) -> None:
+    database_path = tmp_path / "query-identity.db"
+    database_url = f"sqlite:///{database_path}?timeout=5"
+    engine = create_engine(database_url)
+
+    with Session(engine) as db:
+        acquire_quantxy_seed_transaction_lock(db)
+        db.rollback()
+
+    expected_lock_path = database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    )
+    assert expected_lock_path.is_file()
+    assert list(tmp_path.glob("*.quantxy-seed.lock")) == [expected_lock_path]
+    engine.dispose()
+
+
+def test_sqlite_file_uri_uses_its_real_file_for_lock_identity(tmp_path: Path) -> None:
+    from app.db import workbench_seed
+
+    database_path = tmp_path / "uri-identity.db"
+    engine = create_engine(f"sqlite:///file:{database_path}?timeout=5&uri=true")
+    with Session(engine) as db:
+        assert workbench_seed._sqlite_seed_lock_path(db) == database_path.with_name(
+            f"{database_path.name}.quantxy-seed.lock"
+        )
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "sqlite:///:memory:",
+        "sqlite+pysqlite:///:memory:",
+        "sqlite:///file:quantxy-memory?mode=memory&cache=shared&uri=true",
+        "sqlite+pysqlite:///file:quantxy-memory?mode=memory&cache=shared&uri=true",
+    ],
+)
+def test_sqlite_memory_urls_do_not_have_a_file_lock_path(database_url: str) -> None:
+    from app.db import workbench_seed
+
+    engine = create_engine(database_url)
+    with Session(engine) as db:
+        assert workbench_seed._sqlite_seed_lock_path(db) is None
+    engine.dispose()
+
+
+def test_demo_seed_serializes_plain_and_driver_urls_with_queries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "driver-query-multiprocess.db"
+    plain_url = f"sqlite:///{database_path}?timeout=0.001"
+    driver_url = f"sqlite+pysqlite:///{database_path}?timeout=0.001"
+    data_dir = tmp_path / "driver-query-data"
+    monkeypatch.setenv("DATABASE_URL", plain_url)
+    monkeypatch.setenv("ULTRARAG_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ULTRARAG_DOTENV", "/dev/null")
+
+    engine = create_engine(plain_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with engine.connect() as connection:
+        assert connection.execute(text("PRAGMA journal_mode=WAL")).scalar_one() == "wal"
+    engine.dispose()
+
+    context = multiprocessing.get_context("spawn")
+    start = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_seed_demo_data_in_process,
+            args=(url, str(data_dir), start, results),
+        )
+        for url in (plain_url, driver_url)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=30)
+        outcomes = [results.get(timeout=5) for _ in processes]
+
+        assert [process.exitcode for process in processes] == [0, 0]
+        assert outcomes == [("ok", None), ("ok", None)]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        results.close()
+        results.join_thread()
+
+    verification_engine = create_engine(plain_url)
+    with Session(verification_engine) as db:
+        assert _model_ids(db, Department) == tuple(sorted(EXPECTED_DEPARTMENTS))
+        assert _model_ids(db, EmployeeProfile) == tuple(sorted(EXPECTED_EMPLOYEES))
+        assert _model_ids(db, WorkProject) == ("project_quantxy_delivery_example",)
+        assert set(_model_ids(db, WorkTask)) == EXPECTED_TASK_IDS
+        assert len(_model_ids(db, WorkTaskDependency)) == len(EXPECTED_DEPENDENCIES)
+        assert set(_model_ids(db, WorkTaskEvent)) == {
+            event_id
+            for event_ids in EXPECTED_TASK_EVENT_IDS.values()
+            for event_id in event_ids
+        }
+    verification_engine.dispose()
+
+    canonical_lock_path = database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    )
+    assert canonical_lock_path.is_file()
+    assert list(tmp_path.glob("*.quantxy-seed.lock")) == [canonical_lock_path]
 
 
 @pytest.mark.parametrize("cleanup", ["rollback", "close"])
@@ -686,6 +862,94 @@ def test_quantxy_lock_acquisition_rejects_a_preexisting_root_transaction(
     engine.dispose()
 
 
+def test_quantxy_lock_rejects_an_external_connection_write_transaction(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "external-connection-contract.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    SQLModel.metadata.create_all(engine)
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        connection.execute(
+            Tenant.__table__.insert().values(
+                id="external_contract_marker",
+                name="External contract marker",
+            )
+        )
+        with Session(bind=connection) as db, pytest.raises(
+            RuntimeError,
+            match="seed transaction lock must be acquired before the Session starts",
+        ):
+            acquire_quantxy_seed_transaction_lock(db)
+        assert connection.in_transaction()
+        transaction.rollback()
+
+    assert not database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    ).exists()
+    engine.dispose()
+
+
+def test_existing_workbench_is_a_noop_inside_an_external_connection_transaction(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "external-existing-noop.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as db:
+        admin = User(
+            id="admin",
+            tenant_id="tenant_demo",
+            username="admin",
+            role="admin",
+            password_hash="admin-hash",
+        )
+        db.add_all(
+            [
+                Tenant(id="tenant_demo", name="Demo Enterprise"),
+                admin,
+                User(
+                    id="user_demo",
+                    tenant_id="tenant_demo",
+                    username="user_demo",
+                    password_hash="demo-hash",
+                ),
+                Department(
+                    id="user_owned_department",
+                    tenant_id="tenant_demo",
+                    name="User-owned department",
+                    code="OWNED",
+                    manager_user_id=admin.id,
+                ),
+            ]
+        )
+        db.commit()
+
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        connection.execute(
+            Tenant.__table__.insert().values(
+                id="external_existing_marker",
+                name="External existing marker",
+            )
+        )
+        with Session(bind=connection) as db:
+            seed_quantxy_workbench(db)
+        assert connection.in_transaction()
+        transaction.rollback()
+
+    assert not database_path.with_name(
+        f"{database_path.name}.quantxy-seed.lock"
+    ).exists()
+    with Session(engine) as db:
+        assert _model_ids(db, Department) == ("user_owned_department",)
+        assert _model_ids(db, EmployeeProfile) == ()
+        assert _model_ids(db, WorkProject) == ()
+        assert db.get(Tenant, "external_existing_marker") is None
+    engine.dispose()
+
+
 def test_existing_workbench_is_a_safe_noop_inside_a_preexisting_transaction(
     tmp_path: Path,
 ) -> None:
@@ -803,9 +1067,92 @@ def test_prewritten_transaction_fails_fast_without_deadlocking_normal_seed(
     verification_engine.dispose()
 
 
-def test_quantxy_seed_supports_a_connection_bound_session(tmp_path: Path) -> None:
-    database_path = tmp_path / "connection-bound-seed.db"
-    engine = create_engine(f"sqlite:///{database_path}")
+def test_external_connection_transaction_does_not_invert_the_seed_lock(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "external-connection-deadlock.db"
+    database_url = f"sqlite:///{database_path}"
+    engine = create_engine(database_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
+    with engine.connect() as connection:
+        assert connection.execute(text("PRAGMA journal_mode=WAL")).scalar_one() == "wal"
+    with Session(engine) as db:
+        db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
+        db.add_all(
+            [
+                User(
+                    id="admin",
+                    tenant_id="tenant_demo",
+                    username="admin",
+                    role="admin",
+                    password_hash="admin-hash",
+                ),
+                User(
+                    id="user_demo",
+                    tenant_id="tenant_demo",
+                    username="user_demo",
+                    password_hash="demo-hash",
+                ),
+            ]
+        )
+        db.commit()
+    engine.dispose()
+
+    context = multiprocessing.get_context("spawn")
+    write_locked = context.Event()
+    file_locked = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_external_prewritten_seed_in_process,
+            args=(database_url, write_locked, file_locked, results),
+        ),
+        context.Process(
+            target=_locked_normal_seed_in_process,
+            args=(database_url, write_locked, file_locked, results),
+        ),
+    ]
+    try:
+        for process in processes:
+            process.start()
+        deadline = time.monotonic() + 12
+        for process in processes:
+            process.join(timeout=max(0, deadline - time.monotonic()))
+
+        assert [process.exitcode for process in processes] == [0, 0]
+        outcomes = [results.get(timeout=5) for _ in processes]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        results.close()
+        results.join_thread()
+
+    external = next(item for item in outcomes if item[0].startswith("external_"))
+    normal = next(item for item in outcomes if item[0].startswith("normal_"))
+    assert normal == ("normal_ok", None, None)
+    assert external[0] == "external_prewritten_rejected"
+    assert "seed transaction lock must be acquired before the Session starts" in external[1]
+    assert external[2] is not None and external[2] < 2
+    assert external[3] is True
+
+    verification_engine = create_engine(database_url)
+    with Session(verification_engine) as db:
+        assert db.get(Tenant, "external_prewritten_transaction_marker") is None
+        assert _model_ids(db, Department) == tuple(sorted(EXPECTED_DEPARTMENTS))
+        assert _model_ids(db, EmployeeProfile) == tuple(sorted(EXPECTED_EMPLOYEES))
+    verification_engine.dispose()
+
+
+@pytest.mark.parametrize("cleanup", ["commit", "rollback", "close"])
+def test_connection_bound_seed_cleanup_releases_transaction_and_lock_for_a_process(
+    cleanup: str,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / f"connection-bound-{cleanup}.db"
+    database_url = f"sqlite:///{database_path}"
+    engine = create_engine(database_url)
     SQLModel.metadata.create_all(engine)
     with Session(engine) as db:
         db.add(Tenant(id="tenant_demo", name="Demo Enterprise"))
@@ -828,9 +1175,32 @@ def test_quantxy_seed_supports_a_connection_bound_session(tmp_path: Path) -> Non
         )
         db.commit()
 
-    with engine.connect() as connection, Session(bind=connection) as db:
+    with engine.connect() as connection:
+        db = Session(bind=connection)
         seed_quantxy_workbench(db)
-        db.commit()
+        assert connection.in_transaction()
+        seed_quantxy_workbench(db)
+        getattr(db, cleanup)()
+        assert not connection.in_transaction()
+
+        context = multiprocessing.get_context("spawn")
+        results = context.Queue()
+        contender = context.Process(
+            target=_seed_quantxy_workbench_in_process,
+            args=(database_url, results),
+        )
+        try:
+            contender.start()
+            contender.join(timeout=15)
+            assert contender.exitcode == 0
+            assert results.get(timeout=5) == ("contender_ok", None)
+        finally:
+            if contender.is_alive():
+                contender.terminate()
+                contender.join(timeout=5)
+            results.close()
+            results.join_thread()
+            db.close()
 
     with Session(engine) as db:
         assert _model_ids(db, Department) == tuple(sorted(EXPECTED_DEPARTMENTS))

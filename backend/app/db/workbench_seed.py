@@ -10,11 +10,12 @@ from threading import Lock
 from typing import BinaryIO
 
 from sqlalchemy import event
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import SessionTransaction
 from sqlmodel import Session, select
 
-from app.db.database_path import sqlite_database_path
+from app.db.database_path import sqlite_database_path_from_url
 from app.db.models import (
     Department,
     EmployeeProfile,
@@ -47,10 +48,17 @@ def _sqlite_seed_lock_path(session: Session) -> Path | None:
     if bind.dialect.name != "sqlite":
         return None
     engine = getattr(bind, "engine", bind)
-    database_path = sqlite_database_path(engine.url.render_as_string(hide_password=False))
+    database_path = sqlite_database_path_from_url(engine.url)
     if database_path is None:
         return None
     return database_path.with_name(f"{database_path.name}.quantxy-seed.lock")
+
+
+def _has_preexisting_transaction(session: Session) -> bool:
+    if session.in_transaction():
+        return True
+    bind = session.get_bind()
+    return isinstance(bind, Connection) and bind.in_transaction()
 
 
 def _lock_file(handle: BinaryIO) -> None:
@@ -139,7 +147,7 @@ def acquire_quantxy_seed_transaction_lock(session: Session) -> None:
     """
     if session.info.get(_SESSION_LOCK_KEY):
         return
-    if session.in_transaction():
+    if _has_preexisting_transaction(session):
         raise RuntimeError(_PREEXISTING_TRANSACTION_ERROR)
     _SEED_LOCK.acquire()
     file_handle: BinaryIO | None = None
@@ -233,7 +241,7 @@ def seed_quantxy_workbench(session: Session, tenant_id: str = TENANT_ID) -> None
     if tenant_id != TENANT_ID:
         raise ValueError("QuantXY workbench seed only supports tenant_demo")
 
-    if session.in_transaction() and not session.info.get(_SESSION_LOCK_KEY):
+    if not session.info.get(_SESSION_LOCK_KEY) and _has_preexisting_transaction(session):
         # An already-populated workbench is a read-only no-op. An empty one
         # must not wait for the seed file lock while its caller may already
         # hold a database write lock in the opposite order.
