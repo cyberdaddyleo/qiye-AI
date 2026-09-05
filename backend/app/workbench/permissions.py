@@ -40,8 +40,6 @@ class WorkbenchAccess:
                     Department.manager_user_id == user_id,
                 )
             ).all()
-            if profile.department_id:
-                managed_ids.append(profile.department_id)
         return cls(
             tenant_id=tenant_id,
             user_id=user_id,
@@ -54,7 +52,7 @@ class WorkbenchAccess:
     def directory_scope(self) -> str:
         if self.can_view_all:
             return "all"
-        if self.business_role == "manager":
+        if self.managed_department_ids:
             return "department"
         return "self"
 

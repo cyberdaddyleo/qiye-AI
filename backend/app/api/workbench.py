@@ -38,6 +38,7 @@ from app.workbench.permissions import (
     require_global_manager,
 )
 from app.workbench.schema import (
+    PlanDispatchTask,
     PlanPreviewRequest,
     PlanRead,
     TaskRead,
@@ -234,6 +235,7 @@ class PlanDispatchRequest(BaseModel):
     tenant_id: str
     variant_key: Literal["A", "B", "C"]
     idempotency_key: str = Field(min_length=1, max_length=200)
+    tasks: list[PlanDispatchTask] = Field(min_length=1, max_length=100)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -365,6 +367,8 @@ def get_access_endpoint(
         business_role=access.business_role,
         directory_scope=access.directory_scope,
         can_create_project=access.can_create_project,
+        can_view_all=access.can_view_all,
+        managed_department_ids=sorted(access.managed_department_ids),
     )
 
 
@@ -462,6 +466,7 @@ def dispatch_plan_endpoint(
         request.variant_key,
         request.idempotency_key,
         current_user,
+        request.tasks,
     )
     if not getattr(rows, "created", False):
         response.status_code = 200

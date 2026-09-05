@@ -220,7 +220,7 @@ def test_workbench_dtos_are_strict_and_normalize_plan_credentials() -> None:
     assert project.version == 3
 
 
-def test_workbench_project_version_migrates_existing_sqlite_table() -> None:
+def test_workbench_project_and_dispatch_audit_migrate_existing_sqlite_tables() -> None:
     from app.db.database import _migrate_workbench_schema
 
     engine = create_engine("sqlite://")
@@ -238,13 +238,38 @@ def test_workbench_project_version_migrates_existing_sqlite_table() -> None:
                 "VALUES ('project_old', 'tenant_1', 'Old', 'Ship')"
             )
         )
-        _migrate_workbench_schema(
-            connection, inspect(connection), {"workbench_projects"}
+        connection.execute(
+            text(
+                "CREATE TABLE workbench_plans ("
+                "id VARCHAR PRIMARY KEY, tenant_id VARCHAR NOT NULL, "
+                "project_id VARCHAR NOT NULL, goal VARCHAR NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO workbench_plans (id, tenant_id, project_id, goal) "
+                "VALUES ('plan_old', 'tenant_1', 'project_old', 'Ship')"
+            )
         )
         _migrate_workbench_schema(
-            connection, inspect(connection), {"workbench_projects"}
+            connection,
+            inspect(connection),
+            {"workbench_projects", "workbench_plans"},
+        )
+        _migrate_workbench_schema(
+            connection,
+            inspect(connection),
+            {"workbench_projects", "workbench_plans"},
         )
         version = connection.execute(
             text("SELECT version FROM workbench_projects WHERE id = 'project_old'")
         ).scalar_one()
         assert version == 0
+        plan = connection.execute(
+            text(
+                "SELECT selected_variant_json, dispatch_overrides_json "
+                "FROM workbench_plans WHERE id = 'plan_old'"
+            )
+        ).one()
+        assert plan.selected_variant_json is None
+        assert plan.dispatch_overrides_json == "[]"

@@ -25,6 +25,8 @@ class WorkbenchAccessRead(BaseModel):
     business_role: BusinessRole
     directory_scope: DirectoryScope
     can_create_project: bool
+    can_view_all: bool
+    managed_department_ids: list[str] = Field(default_factory=list)
 
 
 class DepartmentRead(BaseModel):
@@ -95,6 +97,22 @@ class PlanPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PlanDispatchTask(BaseModel):
+    key: str = Field(min_length=1, max_length=80)
+    assignee_user_id: str | None
+    start_date: date | None
+    due_date: date | None
+    acceptance_criteria: str = Field(min_length=1, max_length=10_000)
+    depends_on: list[str] = Field(max_length=40)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("key", "acceptance_criteria", mode="before")
+    @classmethod
+    def strip_dispatch_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class WorkTaskEventRead(BaseModel):
     id: str
     task_id: str
@@ -127,6 +145,14 @@ class PlanRead(BaseModel):
         default_factory=list, validation_alias=AliasChoices("variants", "variants_json")
     )
     selected_variant: str | None = None
+    selected_variant_snapshot: dict[str, Any] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("selected_variant_snapshot", "selected_variant_json"),
+    )
+    dispatch_overrides: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("dispatch_overrides", "dispatch_overrides_json"),
+    )
     dispatch_idempotency_key: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -137,6 +163,11 @@ class PlanRead(BaseModel):
     @field_validator("variants", mode="before")
     @classmethod
     def remove_model_credentials(cls, value: Any) -> Any:
+        return _without_model_credentials(value)
+
+    @field_validator("selected_variant_snapshot", "dispatch_overrides", mode="before")
+    @classmethod
+    def remove_dispatch_model_credentials(cls, value: Any) -> Any:
         return _without_model_credentials(value)
 
 

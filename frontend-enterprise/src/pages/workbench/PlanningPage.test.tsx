@@ -49,6 +49,8 @@ const managerAccess: WorkbenchAccessRead = {
   business_role: 'manager',
   directory_scope: 'department',
   can_create_project: true,
+  can_view_all: false,
+  managed_department_ids: ['department-product'],
 };
 
 const project: ProjectRead = {
@@ -92,6 +94,17 @@ const employee: EmployeeRead = {
   status: 'active',
   created_at: '2026-09-01T08:00:00Z',
   updated_at: '2026-09-04T08:00:00Z',
+};
+
+const alternateEmployee: EmployeeRead = {
+  ...employee,
+  id: 'employee-delivery',
+  user_id: 'user-delivery',
+  username: 'chenyu',
+  display_name: '陈宇',
+  employee_no: 'E003',
+  job_title: '交付经理',
+  skills: ['发布管理'],
 };
 
 function variant(
@@ -180,6 +193,8 @@ const fallbackPlan: PlanRead = {
     variant('C', '成本方案', 'cost', 8800, '2026-09-10'),
   ],
   selected_variant: null,
+  selected_variant_snapshot: null,
+  dispatch_overrides: [],
   dispatch_idempotency_key: null,
   created_at: '2026-09-05T08:00:00Z',
   updated_at: '2026-09-05T08:00:00Z',
@@ -223,12 +238,15 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function renderPlanning(path = '/enterprise/planning?project_id=project-launch') {
+function renderPlanning(
+  path = '/enterprise/planning?project_id=project-launch',
+  currentUser = manager,
+) {
   return render(
     <I18nProvider>
       <MemoryRouter initialEntries={[path]}>
         <Routes>
-          <Route path="/enterprise/planning" element={<PlanningPage currentUser={manager} />} />
+          <Route path="/enterprise/planning" element={<PlanningPage currentUser={currentUser} />} />
           <Route path="/enterprise/tasks" element={<p>已进入创建任务列表</p>} />
         </Routes>
       </MemoryRouter>
@@ -289,7 +307,12 @@ describe('PlanningPage', () => {
       business_role: 'member',
       directory_scope: 'self',
       can_create_project: false,
+      can_view_all: false,
+      managed_department_ids: [],
     });
+    vi.mocked(workbenchApi.listProjects).mockResolvedValueOnce([
+      { ...project, owner_user_id: 'user-other', department_id: 'department-other' },
+    ]);
     vi.mocked(workbenchApi.listEmployees).mockRejectedValueOnce(
       new ApiError(403, '{"detail":"Forbidden"}', 'Forbidden'),
     );
@@ -394,6 +417,14 @@ describe('PlanningPage', () => {
     expect(firstRequest.tenant_id).toBe(manager.tenant_id);
     expect(firstRequest.variant_key).toBe('B');
     expect(firstRequest.idempotency_key.length).toBeGreaterThan(8);
+    expect(firstRequest.tasks).toEqual(fallbackPlan.variants[1].tasks.map((task) => ({
+      key: task.key,
+      assignee_user_id: task.assignee_user_id,
+      start_date: task.start_date,
+      due_date: task.due_date,
+      acceptance_criteria: task.acceptance_criteria,
+      depends_on: task.depends_on,
+    })));
 
     dispatch.resolve([dispatchedTask]);
     expect(await screen.findByText('已进入创建任务列表')).toBeTruthy();
@@ -442,5 +473,78 @@ describe('PlanningPage', () => {
       expect.stringContaining('方案状态已变化'),
     );
     expect(screen.queryByText('已进入创建任务列表')).toBeNull();
+  });
+
+  it('dispatches the edited WBS and labels manual assignment provenance and frozen estimates', async () => {
+    vi.mocked(workbenchApi.listEmployees).mockResolvedValueOnce([employee, alternateEmployee]);
+    const user = userEvent.setup();
+    renderPlanning();
+
+    await generatePlan(user);
+    const wbs = await screen.findByRole('region', { name: '可编辑 WBS' });
+    await user.selectOptions(
+      within(wbs).getByLabelText('用户研究负责人'),
+      alternateEmployee.user_id,
+    );
+    expect(within(wbs).getByText('人工改派')).toBeTruthy();
+    expect(within(wbs).queryByText('岗位与用户研究技能匹配，且当前仍有可用容量。')).toBeNull();
+
+    await user.selectOptions(within(wbs).getByLabelText('上线发布负责人'), employee.user_id);
+    expect(within(wbs).getByText('人工指定')).toBeTruthy();
+    expect(within(wbs).queryByText('依据岗位、技能、容量与协作连续性综合推荐。')).toBeNull();
+    await user.clear(within(wbs).getByLabelText('上线发布截止日期'));
+    await user.type(within(wbs).getByLabelText('上线发布截止日期'), '2026-09-09');
+    await user.clear(within(wbs).getByLabelText('上线发布验收标准'));
+    await user.type(within(wbs).getByLabelText('上线发布验收标准'), '人工验收后的发布清单');
+    await user.click(within(wbs).getByRole('checkbox', { name: '上线发布依赖用户研究' }));
+
+    expect(screen.getAllByText('AI 原始方案估算').length).toBeGreaterThan(0);
+    expect(screen.getByText('WBS 已修改，估算未重新计算')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '进入确认' }));
+    expect(screen.getByText('已修改 WBS')).toBeTruthy();
+    expect(screen.getByText(/以下为人工编辑后的 WBS/)).toBeTruthy();
+    expect(screen.getByText('AI 原始预计完成')).toBeTruthy();
+    expect(screen.getByText('AI 原始预计成本')).toBeTruthy();
+
+    await user.click(screen.getByRole('checkbox', { name: '我已确认由真人员工承担任务责任' }));
+    await user.click(screen.getByRole('button', { name: '确认并下发' }));
+    await waitFor(() => expect(workbenchApi.dispatchPlan).toHaveBeenCalledTimes(1));
+    const request = vi.mocked(workbenchApi.dispatchPlan).mock.calls[0][1];
+    expect(request.tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'research', assignee_user_id: alternateEmployee.user_id }),
+      expect.objectContaining({
+        key: 'launch',
+        assignee_user_id: employee.user_id,
+        due_date: '2026-09-09',
+        acceptance_criteria: '人工验收后的发布清单',
+        depends_on: [],
+      }),
+    ]));
+  });
+
+  it('allows an ordinary member to plan a project they own', async () => {
+    const ownerAccess: WorkbenchAccessRead = {
+      ...managerAccess,
+      business_role: 'member',
+      directory_scope: 'self',
+      can_create_project: false,
+      can_view_all: false,
+      managed_department_ids: [],
+    };
+    vi.mocked(workbenchApi.getAccess).mockResolvedValueOnce(ownerAccess);
+    vi.mocked(workbenchApi.listEmployees).mockRejectedValueOnce(
+      new ApiError(403, '{"detail":"Forbidden"}', 'Forbidden'),
+    );
+    const user = userEvent.setup();
+    renderPlanning('/enterprise/planning?project_id=project-launch', manager);
+
+    expect(await screen.findByRole('heading', { name: '规划目标与约束' })).toBeTruthy();
+    await generatePlan(user);
+    await screen.findByText('内置规划引擎');
+    await user.click(screen.getByRole('button', { name: '进入确认' }));
+    await user.click(screen.getByRole('checkbox', { name: '我已确认由真人员工承担任务责任' }));
+    await user.click(screen.getByRole('button', { name: '确认并下发' }));
+
+    await waitFor(() => expect(workbenchApi.dispatchPlan).toHaveBeenCalledTimes(1));
   });
 });

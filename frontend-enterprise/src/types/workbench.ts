@@ -18,6 +18,8 @@ export type WorkbenchAccessRead = {
   business_role: BusinessRole;
   directory_scope: WorkbenchDirectoryScope;
   can_create_project: boolean;
+  can_view_all: boolean;
+  managed_department_ids: string[];
 };
 
 export type DepartmentRead = {
@@ -89,6 +91,9 @@ export type PlanningTask = {
   start_date: string | null;
   due_date: string | null;
   assignment: {
+    provenance?: 'ai' | 'manual';
+    manual_assignment_kind?: 'assigned' | 'reassigned';
+    previous_assignee_user_id?: string | null;
     score_components?: Record<string, number>;
     total_score?: number;
     effective_capacity_percent?: number;
@@ -138,6 +143,11 @@ export type PlanRead = {
   source: PlanSource;
   variants: PlanVariant[];
   selected_variant: PlanVariantKey | null;
+  selected_variant_snapshot: PlanVariant | null;
+  dispatch_overrides: Array<{
+    key: string;
+    changes: Record<string, { from: unknown; to: unknown }>;
+  }>;
   dispatch_idempotency_key: string | null;
   created_at: string;
   updated_at: string;
@@ -232,6 +242,15 @@ export type PlanDispatchRequest = {
   tenant_id: string;
   variant_key: PlanVariantKey;
   idempotency_key: string;
+  tasks: Array<Pick<
+    PlanningTask,
+    | 'key'
+    | 'assignee_user_id'
+    | 'start_date'
+    | 'due_date'
+    | 'acceptance_criteria'
+    | 'depends_on'
+  >>;
 };
 
 export type TaskListQuery = {

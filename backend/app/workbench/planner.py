@@ -163,6 +163,21 @@ def validate_planning_tasks(tasks: list[PlanningTask]) -> None:
         raise ValueError("unknown dependency")
     if any(task.key in task.depends_on for task in tasks):
         raise ValueError("self dependency")
+    by_key = {task.key: task for task in tasks}
+    for task in tasks:
+        if (task.start_date is None) != (task.due_date is None):
+            raise ValueError("task schedule must include both start and due dates")
+        if task.start_date and task.due_date and task.start_date > task.due_date:
+            raise ValueError("task due date precedes start date")
+        for dependency_key in task.depends_on:
+            dependency = by_key.get(dependency_key)
+            if (
+                dependency
+                and dependency.due_date
+                and task.start_date
+                and task.start_date <= dependency.due_date
+            ):
+                raise ValueError("task starts before dependency is complete")
     visiting: set[str] = set()
     visited: set[str] = set()
 

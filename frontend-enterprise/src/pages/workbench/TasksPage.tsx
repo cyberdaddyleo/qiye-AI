@@ -204,8 +204,8 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
     }
   }
 
-  async function mutateTask(run: (task: TaskRead) => Promise<TaskRead>) {
-    if (!detailTask || actionBusy) return;
+  async function mutateTask(run: (task: TaskRead) => Promise<TaskRead>): Promise<boolean> {
+    if (!detailTask || actionBusy) return false;
     const taskAtIntent = detailTask;
     setActionBusy(true);
     setActionError('');
@@ -213,15 +213,20 @@ export default function TasksPage({ currentUser, onLogout }: TasksPageProps) {
     try {
       await run(taskAtIntent);
       await refetchTaskState(taskAtIntent.id);
+      return true;
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 409) {
         await refetchTaskState(taskAtIntent.id);
         setConflictMessage('任务版本冲突，已刷新最新状态。请根据服务端最新内容重新操作。');
       } else if (caught instanceof ApiError && caught.status === 403) {
         setActionError('操作被拒绝：当前账号没有此任务操作权限。');
+      } else if (caught instanceof ApiError && caught.status >= 400 && caught.status < 500) {
+        setActionError('任务操作失败，请检查输入后重试。');
       } else {
-        setActionError('任务操作失败，请稍后重试。');
+        await refetchTaskState(taskAtIntent.id);
+        setActionError('任务操作结果未知，已刷新服务端状态；请核对后再重试。');
       }
+      return false;
     } finally {
       setActionBusy(false);
     }

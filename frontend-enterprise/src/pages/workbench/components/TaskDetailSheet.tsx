@@ -50,10 +50,10 @@ export type TaskDetailSheetProps = {
   allTasks: TaskRead[];
   onRetry?: () => void;
   onOpenTask?: (taskId: string) => void;
-  onStart: () => Promise<void> | void;
-  onComment: (comment: string) => Promise<void> | void;
-  onSubmit: (summary: string) => Promise<void> | void;
-  onReview: (verdict: ReviewVerdict, comment: string) => Promise<void> | void;
+  onStart: () => Promise<boolean> | boolean;
+  onComment: (comment: string) => Promise<boolean> | boolean;
+  onSubmit: (summary: string) => Promise<boolean> | boolean;
+  onReview: (verdict: ReviewVerdict, comment: string) => Promise<boolean> | boolean;
 };
 
 const STATUS_CLASS = {
@@ -131,15 +131,17 @@ export default function TaskDetailSheet({
   );
   const taskById = useMemo(() => new Map(allTasks.map((row) => [row.id, row])), [allTasks]);
   const project = task ? projects.find((row) => row.id === task.project_id) : undefined;
-  const managerAccess = access?.business_role === 'admin'
-    || access?.business_role === 'ceo'
-    || access?.business_role === 'manager';
   const projectOwner = project?.owner_user_id === currentUser.id;
+  const managedProject = Boolean(
+    project?.department_id
+    && access?.managed_department_ids.includes(project.department_id),
+  );
+  const canManageProject = Boolean(access?.can_view_all || projectOwner || managedProject);
   const canExecute = Boolean(task && (
-    task.assignee_user_id === currentUser.id || managerAccess || projectOwner
+    task.assignee_user_id === currentUser.id || canManageProject
   ));
   const canReview = Boolean(task && (
-    task.reviewer_user_id === currentUser.id || managerAccess || projectOwner
+    task.reviewer_user_id === currentUser.id || canManageProject
   ));
   const events = useMemo(
     () => [...(task?.events || [])].sort((left, right) => (
@@ -159,8 +161,7 @@ export default function TaskDetailSheet({
       return;
     }
     setFormError('');
-    await onComment(value);
-    setComment('');
+    if (await onComment(value)) setComment('');
   }
 
   async function submitResult() {
@@ -170,8 +171,7 @@ export default function TaskDetailSheet({
       return;
     }
     setFormError('');
-    await onSubmit(value);
-    setSummary('');
+    if (await onSubmit(value)) setSummary('');
   }
 
   async function review(verdict: ReviewVerdict) {
@@ -181,8 +181,7 @@ export default function TaskDetailSheet({
       return;
     }
     setFormError('');
-    await onReview(verdict, value);
-    setReviewComment('');
+    if (await onReview(verdict, value)) setReviewComment('');
   }
 
   return (

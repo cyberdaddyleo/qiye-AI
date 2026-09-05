@@ -108,6 +108,8 @@ function stubShellFetch() {
         business_role: 'admin',
         directory_scope: 'all',
         can_create_project: true,
+        can_view_all: true,
+        managed_department_ids: [],
       });
     }
     if (url.includes('/api/enterprise/workbench/dashboard')) {
@@ -263,6 +265,16 @@ describe('typed workbench API boundary', () => {
       tenant_id: 'tenant_a',
       variant_key: 'B',
       idempotency_key: 'dispatch-1',
+      tasks: [
+        {
+          key: 'release',
+          assignee_user_id: 'user-1',
+          start_date: '2026-09-07',
+          due_date: '2026-09-08',
+          acceptance_criteria: 'Release accepted',
+          depends_on: [],
+        },
+      ],
     });
     await listTasks({
       tenant_id: 'tenant_a',
@@ -316,7 +328,21 @@ describe('typed workbench API boundary', () => {
       {
         url: '/api/enterprise/workbench/plans/plan-1/dispatch',
         method: 'POST',
-        body: { tenant_id: 'tenant_a', variant_key: 'B', idempotency_key: 'dispatch-1' },
+        body: {
+          tenant_id: 'tenant_a',
+          variant_key: 'B',
+          idempotency_key: 'dispatch-1',
+          tasks: [
+            {
+              key: 'release',
+              assignee_user_id: 'user-1',
+              start_date: '2026-09-07',
+              due_date: '2026-09-08',
+              acceptance_criteria: 'Release accepted',
+              depends_on: [],
+            },
+          ],
+        },
       },
       {
         url: '/api/enterprise/workbench/tasks?tenant_id=tenant_a&scope=all&status=review&project_id=project-1',

@@ -1946,6 +1946,21 @@ def _migrate_workbench_schema(conn, inspector, tables: set[str]) -> None:
                 "ADD COLUMN version INTEGER NOT NULL DEFAULT 0"
             )
         )
+    if "workbench_plans" in tables:
+        plan_columns = {
+            column["name"] for column in inspector.get_columns("workbench_plans")
+        }
+        if "selected_variant_json" not in plan_columns:
+            conn.execute(
+                text("ALTER TABLE workbench_plans ADD COLUMN selected_variant_json JSON")
+            )
+        if "dispatch_overrides_json" not in plan_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE workbench_plans ADD COLUMN dispatch_overrides_json "
+                    "JSON NOT NULL DEFAULT '[]'"
+                )
+            )
 
 
 def _migrate_harness_v2_schema(conn, inspector, tables: set[str]) -> None:

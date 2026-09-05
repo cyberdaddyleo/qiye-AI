@@ -18,6 +18,7 @@ import type {
 
 import WorkbenchLayout from './WorkbenchLayout';
 import { workbenchApi } from './workbenchApi';
+import { isTaskOverdue } from './workbenchDate';
 import TaskCard from './components/TaskCard';
 import TaskDetailSheet from './components/TaskDetailSheet';
 import WorkbenchKpi from './components/WorkbenchKpi';
@@ -26,6 +27,8 @@ import WorkloadBar from './components/WorkloadBar';
 export type MyWorkPageProps = {
   currentUser: EnterpriseAuthUser;
   onLogout?: () => void;
+  now?: Date;
+  timeZone?: string;
 };
 
 const EMPTY_DASHBOARD: DashboardRead = {
@@ -84,7 +87,12 @@ function eventLabel(
   return `${name}${EVENT_ACTION[event.event_type] || '更新了工作动态'}`;
 }
 
-export default function MyWorkPage({ currentUser, onLogout }: MyWorkPageProps) {
+export default function MyWorkPage({
+  currentUser,
+  onLogout,
+  now,
+  timeZone,
+}: MyWorkPageProps) {
   const [access, setAccess] = useState<WorkbenchAccessRead | null>(null);
   const [dashboard, setDashboard] = useState<DashboardRead>(EMPTY_DASHBOARD);
   const [tasks, setTasks] = useState<TaskRead[]>([]);
@@ -158,15 +166,15 @@ export default function MyWorkPage({ currentUser, onLogout }: MyWorkPageProps) {
     () => new Map(projects.map((project) => [project.id, project])),
     [projects],
   );
-  const today = new Date().toISOString().slice(0, 10);
-  const inProgress = tasks.filter((task) => task.status === 'in_progress');
-  const inReview = tasks.filter((task) => task.status === 'review');
-  const overdue = tasks.filter((task) => (
-    task.status !== 'done'
-    && task.status !== 'canceled'
-    && Boolean(task.due_date && task.due_date < today)
+  const businessNow = useMemo(() => now || new Date(), [now]);
+  const executionTasks = tasks.filter((task) => task.assignee_user_id === currentUser.id);
+  const reviewTasks = tasks.filter((task) => task.reviewer_user_id === currentUser.id);
+  const inProgress = executionTasks.filter((task) => task.status === 'in_progress');
+  const inReview = reviewTasks.filter((task) => task.status === 'review');
+  const overdue = executionTasks.filter((task) => (
+    isTaskOverdue(task.due_date, task.status, { now: businessNow, timeZone })
   ));
-  const priorities = [...tasks]
+  const priorities = [...executionTasks]
     .filter((task) => task.status !== 'done' && task.status !== 'canceled')
     .sort((left, right) => (
       PRIORITY_ORDER[left.priority] - PRIORITY_ORDER[right.priority]
@@ -219,8 +227,8 @@ export default function MyWorkPage({ currentUser, onLogout }: MyWorkPageProps) {
     } else setFailure(dashboardResult.reason);
   }
 
-  async function mutateTask(run: (task: TaskRead) => Promise<TaskRead>) {
-    if (!detailTask || actionBusy) return;
+  async function mutateTask(run: (task: TaskRead) => Promise<TaskRead>): Promise<boolean> {
+    if (!detailTask || actionBusy) return false;
     const taskAtIntent = detailTask;
     setActionBusy(true);
     setActionError('');
@@ -228,15 +236,20 @@ export default function MyWorkPage({ currentUser, onLogout }: MyWorkPageProps) {
     try {
       await run(taskAtIntent);
       await refetchTaskState(taskAtIntent.id);
+      return true;
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 409) {
         await refetchTaskState(taskAtIntent.id);
         setConflictMessage('任务版本冲突，已刷新最新状态。请根据服务端最新内容重新操作。');
       } else if (caught instanceof ApiError && caught.status === 403) {
         setActionError('操作被拒绝：当前账号没有此任务操作权限。');
+      } else if (caught instanceof ApiError && caught.status >= 400 && caught.status < 500) {
+        setActionError('任务操作失败，请检查输入后重试。');
       } else {
-        setActionError('任务操作失败，请稍后重试。');
+        await refetchTaskState(taskAtIntent.id);
+        setActionError('任务操作结果未知，已刷新服务端状态；请核对后再重试。');
       }
+      return false;
     } finally {
       setActionBusy(false);
     }
@@ -284,7 +297,7 @@ export default function MyWorkPage({ currentUser, onLogout }: MyWorkPageProps) {
             <Panel title="今日优先">
               {priorities.length ? (
                 <div className="grid gap-[10px] md:grid-cols-2">
-                  {priorities.map((task) => <TaskCard key={task.id} task={task} project={projectById.get(task.project_id)} assignee={employeeByUserId.get(task.assignee_user_id || '')} onOpen={(taskId) => void openTask(taskId)} />)}
+                  {priorities.map((task) => <TaskCard key={task.id} task={task} project={projectById.get(task.project_id)} assignee={employeeByUserId.get(task.assignee_user_id || '')} onOpen={(taskId) => void openTask(taskId)} now={businessNow} timeZone={timeZone} />)}
                 </div>
               ) : <EmptyLine>今天没有需要推进的任务。</EmptyLine>}
             </Panel>
@@ -310,6 +323,19 @@ export default function MyWorkPage({ currentUser, onLogout }: MyWorkPageProps) {
                     ))}
                   </div>
                 ) : <EmptyLine>没有待提交成果。</EmptyLine>}
+              </Panel>
+
+              <Panel title="待我审核">
+                {inReview.length ? (
+                  <div className="space-y-[7px]">
+                    {inReview.map((task) => (
+                      <button key={task.id} type="button" onClick={() => void openTask(task.id)} className="flex w-full items-center justify-between gap-[8px] rounded-[9px] border border-[#edf0f5] px-[10px] py-[9px] text-left text-[11px] text-[#596176] hover:bg-[#f7f9fc]">
+                        <span className="truncate">{task.title}</span>
+                        <span className="shrink-0 text-[9px] text-[#9aa1b3]">等待真人审核</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : <EmptyLine>没有待审核成果。</EmptyLine>}
               </Panel>
             </div>
           </div>

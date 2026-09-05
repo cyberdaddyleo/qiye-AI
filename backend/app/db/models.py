@@ -1688,6 +1688,10 @@ class WorkPlan(SQLModel, table=True):
     source: str = Field(default="model", index=True)
     variants_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
     selected_variant: Optional[str] = None
+    selected_variant_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    dispatch_overrides_json: list[dict[str, Any]] = Field(
+        default_factory=list, sa_column=Column(JSON)
+    )
     dispatch_idempotency_key: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

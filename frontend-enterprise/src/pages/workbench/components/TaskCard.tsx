@@ -3,6 +3,7 @@ import { CalendarDays, GitBranch, UserRoundCheck } from 'lucide-react';
 import type { EmployeeRead, ProjectRead, TaskRead } from '@/types/workbench';
 
 import { taskStatusLabel, taskStatusTone } from '../workbenchModel';
+import { isTaskOverdue } from '../workbenchDate';
 import EmployeeBadgeContainer from './EmployeeBadgeContainer';
 
 export type TaskCardProps = {
@@ -10,6 +11,8 @@ export type TaskCardProps = {
   project?: ProjectRead;
   assignee?: EmployeeRead;
   onOpen: (taskId: string) => void;
+  now?: Date;
+  timeZone?: string;
 };
 
 const PRIORITY_LABEL: Record<TaskRead['priority'], string> = {
@@ -27,12 +30,16 @@ const TONE_CLASS = {
   gray: 'bg-[#f2f3f7] text-[#596176]',
 };
 
-export default function TaskCard({ task, project, assignee, onOpen }: TaskCardProps) {
+export default function TaskCard({
+  task,
+  project,
+  assignee,
+  onOpen,
+  now,
+  timeZone,
+}: TaskCardProps) {
   const statusTone = taskStatusTone(task.status);
-  const dueTone = task.status !== 'done'
-    && task.status !== 'canceled'
-    && task.due_date
-    && task.due_date < new Date().toISOString().slice(0, 10)
+  const dueTone = isTaskOverdue(task.due_date, task.status, { now, timeZone })
     ? 'text-[#d20b0b]'
     : 'text-[#757f9c]';
 

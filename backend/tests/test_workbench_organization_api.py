@@ -90,6 +90,28 @@ def test_workbench_access_permission_matrix() -> None:
         assert other_profile is not None
         assert not can_view_employee(db, "tenant_a", rows["member"]["id"], other_profile)
 
+        titled_manager = User(
+            tenant_id="tenant_a", username="manager-without-scope", password_hash="hash"
+        )
+        db.add(titled_manager)
+        db.flush()
+        db.add(
+            EmployeeProfile(
+                tenant_id="tenant_a",
+                user_id=titled_manager.id,
+                department_id=rows["engineering"]["id"],
+                business_role="manager",
+            )
+        )
+        db.commit()
+        titled_manager_access = WorkbenchAccess.for_user(
+            db, "tenant_a", titled_manager.id
+        )
+        assert titled_manager_access.business_role == "manager"
+        assert titled_manager_access.managed_department_ids == frozenset()
+        assert titled_manager_access.directory_scope == "self"
+        assert not titled_manager_access.can_manage_department(rows["engineering"]["id"])
+
 
 def test_access_api_reports_server_derived_roles_and_project_capabilities() -> None:
     engine = _engine()
@@ -97,17 +119,29 @@ def test_access_api_reports_server_derived_roles_and_project_capabilities() -> N
     rows = _seed(engine)
     client = _client(engine)
     expected = {
-        "admin": ("admin", "all", True),
-        "ceo": ("ceo", "all", True),
-        "manager": ("manager", "department", True),
-        "member": ("member", "self", False),
+        "admin": ("admin", "all", True, True, []),
+        "ceo": ("ceo", "all", True, True, []),
+        "manager": (
+            "manager",
+            "department",
+            True,
+            False,
+            [rows["engineering"]["id"]],
+        ),
+        "member": ("member", "self", False, False, []),
     }
     try:
         assert client.get(
             "/api/enterprise/workbench/access", params={"tenant_id": "tenant_a"}
         ).status_code == 401
 
-        for name, (business_role, directory_scope, can_create_project) in expected.items():
+        for name, (
+            business_role,
+            directory_scope,
+            can_create_project,
+            can_view_all,
+            managed_department_ids,
+        ) in expected.items():
             response = client.get(
                 "/api/enterprise/workbench/access",
                 params={"tenant_id": "tenant_a"},
@@ -120,6 +154,8 @@ def test_access_api_reports_server_derived_roles_and_project_capabilities() -> N
                 "business_role": business_role,
                 "directory_scope": directory_scope,
                 "can_create_project": can_create_project,
+                "can_view_all": can_view_all,
+                "managed_department_ids": managed_department_ids,
             }
 
         cross_tenant = client.get(

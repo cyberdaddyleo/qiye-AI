@@ -572,20 +572,154 @@ class _DispatchTasks(list[WorkTask]):
         self.created = created
 
 
+_DISPATCH_EDITABLE_FIELDS = (
+    "assignee_user_id",
+    "start_date",
+    "due_date",
+    "acceptance_criteria",
+    "depends_on",
+)
+
+
+def _dispatch_variant(
+    plan: WorkPlan,
+    variant_key: str,
+    task_overrides: Iterable[Any] | None,
+) -> tuple[PlanVariant, list[dict[str, Any]]]:
+    try:
+        original = PlanVariant.model_validate(
+            next(item for item in plan.variants_json if item.get("key") == variant_key)
+        )
+    except (StopIteration, ValidationError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Plan variant is invalid") from exc
+    if task_overrides is None:
+        return original, []
+
+    try:
+        override_values = [
+            item.model_dump(mode="python") if hasattr(item, "model_dump") else dict(item)
+            for item in task_overrides
+        ]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Dispatch task overrides are invalid") from exc
+    override_keys = [str(item.get("key") or "") for item in override_values]
+    original_keys = [task.key for task in original.tasks]
+    if len(override_keys) != len(set(override_keys)) or set(override_keys) != set(original_keys):
+        raise HTTPException(
+            status_code=422,
+            detail="Dispatch tasks must contain each selected variant task exactly once",
+        )
+
+    by_key = {str(item["key"]): item for item in override_values}
+    effective_tasks = []
+    audit: list[dict[str, Any]] = []
+    try:
+        for planned in original.tasks:
+            requested = by_key[planned.key]
+            update = {field: requested.get(field) for field in _DISPATCH_EDITABLE_FIELDS}
+            if update["assignee_user_id"] != planned.assignee_user_id:
+                update["assignment"] = {
+                    "provenance": "manual",
+                    "manual_assignment_kind": (
+                        "reassigned" if planned.assignee_user_id else "assigned"
+                    ),
+                    "previous_assignee_user_id": planned.assignee_user_id,
+                }
+                update["unassigned_reason"] = (
+                    None
+                    if update["assignee_user_id"]
+                    else "负责人已由管理者人工取消指派"
+                )
+            effective = type(planned).model_validate(
+                {**planned.model_dump(mode="python"), **update}
+            )
+            effective_tasks.append(effective)
+            changes: dict[str, dict[str, Any]] = {}
+            original_json = planned.model_dump(mode="json")
+            effective_json = effective.model_dump(mode="json")
+            for field in _DISPATCH_EDITABLE_FIELDS:
+                if original_json[field] != effective_json[field]:
+                    changes[field] = {
+                        "from": original_json[field],
+                        "to": effective_json[field],
+                    }
+            if changes:
+                audit.append({"key": planned.key, "changes": changes})
+        effective_variant = PlanVariant.model_validate(
+            {**original.model_dump(mode="python"), "tasks": effective_tasks}
+        )
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Dispatch task overrides are invalid") from exc
+    return effective_variant, audit
+
+
+def _validate_dispatch_variant(db: Session, tenant_id: str, variant: PlanVariant) -> None:
+    try:
+        validate_planning_tasks(variant.tasks)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Plan variant schedule or dependencies are invalid",
+        ) from exc
+
+    assignee_ids = {
+        task.assignee_user_id for task in variant.tasks if task.assignee_user_id
+    }
+    if not assignee_ids:
+        return
+    valid_assignee_ids = set(
+        db.exec(
+            select(EmployeeProfile.user_id)
+            .join(User, User.id == EmployeeProfile.user_id)
+            .where(
+                EmployeeProfile.tenant_id == tenant_id,
+                EmployeeProfile.status == "active",
+                User.tenant_id == tenant_id,
+                EmployeeProfile.user_id.in_(assignee_ids),
+            )
+        ).all()
+    )
+    if valid_assignee_ids != assignee_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="Every assignee must be an active employee in the plan tenant",
+        )
+
+
 def dispatch_plan(
     db: Session,
     plan_id: str,
     variant_key: str,
     idempotency_key: str,
     current_user: User,
+    task_overrides: Iterable[Any] | None = None,
 ) -> list[WorkTask]:
     plan = plan_for_tenant(db, current_user.tenant_id, plan_id)
     project = project_for_tenant(db, plan.tenant_id, plan.project_id)
     access = WorkbenchAccess.for_user(db, plan.tenant_id, current_user.id)
     _ensure_project_manager(access, project)
+    variant, dispatch_overrides = _dispatch_variant(plan, variant_key, task_overrides)
+    selected_snapshot = variant.model_dump(mode="json")
 
     if plan.status == "dispatched":
         if plan.dispatch_idempotency_key == idempotency_key:
+            stored_snapshot = plan.selected_variant_json
+            if stored_snapshot is None:
+                try:
+                    stored_snapshot = PlanVariant.model_validate(
+                        next(
+                            item
+                            for item in plan.variants_json
+                            if item.get("key") == plan.selected_variant
+                        )
+                    ).model_dump(mode="json")
+                except (StopIteration, ValidationError, AttributeError):
+                    stored_snapshot = None
+            if plan.selected_variant != variant_key or stored_snapshot != selected_snapshot:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency key was used with a different dispatch payload",
+                )
             return _DispatchTasks(_tasks_for_plan(db, plan), created=False)
         raise HTTPException(status_code=409, detail="Plan was already dispatched")
     if plan.status != "draft":
@@ -600,21 +734,7 @@ def dispatch_plan(
     if collision:
         raise HTTPException(status_code=409, detail="Idempotency key is already in use")
 
-    try:
-        variant = PlanVariant.model_validate(
-            next(item for item in plan.variants_json if item.get("key") == variant_key)
-        )
-    except (StopIteration, ValidationError, AttributeError) as exc:
-        raise HTTPException(status_code=422, detail="Plan variant is invalid") from exc
-    task_keys = {task.key for task in variant.tasks}
-    if len(task_keys) != len(variant.tasks) or any(
-        dependency not in task_keys for task in variant.tasks for dependency in task.depends_on
-    ):
-        raise HTTPException(status_code=422, detail="Plan variant dependencies are invalid")
-    try:
-        validate_planning_tasks(variant.tasks)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="Plan variant dependencies are invalid") from exc
+    _validate_dispatch_variant(db, plan.tenant_id, variant)
 
     now = utc_now()
     try:
@@ -629,6 +749,8 @@ def dispatch_plan(
             .values(
                 status="approved",
                 selected_variant=variant_key,
+                selected_variant_json=selected_snapshot,
+                dispatch_overrides_json=dispatch_overrides,
                 dispatch_idempotency_key=idempotency_key,
                 updated_at=now,
             )
@@ -638,10 +760,20 @@ def dispatch_plan(
             db.rollback()
             latest = plan_for_tenant(db, current_user.tenant_id, plan_id)
             if latest.status == "dispatched" and latest.dispatch_idempotency_key == idempotency_key:
+                if (
+                    latest.selected_variant != variant_key
+                    or latest.selected_variant_json != selected_snapshot
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Idempotency key was used with a different dispatch payload",
+                    )
                 return _DispatchTasks(_tasks_for_plan(db, latest), created=False)
             raise HTTPException(status_code=409, detail="Plan dispatch conflict")
         plan.status = "approved"
         plan.selected_variant = variant_key
+        plan.selected_variant_json = selected_snapshot
+        plan.dispatch_overrides_json = dispatch_overrides
         plan.dispatch_idempotency_key = idempotency_key
         plan.updated_at = now
 
@@ -658,6 +790,7 @@ def dispatch_plan(
                 priority=planned.priority,
                 status="blocked" if planned.depends_on else "backlog",
                 assignee_user_id=planned.assignee_user_id,
+                reviewer_user_id=project.owner_user_id,
                 start_date=planned.start_date,
                 due_date=planned.due_date,
                 estimate_days=planned.estimate_days,

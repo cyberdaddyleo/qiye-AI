@@ -107,6 +107,8 @@ const adminAccess: WorkbenchAccessRead = {
   business_role: 'admin',
   directory_scope: 'all',
   can_create_project: true,
+  can_view_all: true,
+  managed_department_ids: [],
 };
 
 const ceoAccess: WorkbenchAccessRead = {
@@ -120,6 +122,8 @@ const managerAccess: WorkbenchAccessRead = {
   user_id: managerEmployee.user_id,
   business_role: 'manager',
   directory_scope: 'department',
+  can_view_all: false,
+  managed_department_ids: [department.id],
 };
 
 const memberAccess: WorkbenchAccessRead = {
@@ -128,6 +132,8 @@ const memberAccess: WorkbenchAccessRead = {
   business_role: 'member',
   directory_scope: 'self',
   can_create_project: false,
+  can_view_all: false,
+  managed_department_ids: [],
 };
 
 const project: ProjectRead = {

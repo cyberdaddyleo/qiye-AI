@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -146,6 +146,20 @@ def _preview(client: TestClient, manager: User, project: WorkProject) -> dict:
     return response.json()
 
 
+def _dispatch_tasks(variant: dict) -> list[dict]:
+    return [
+        {
+            "key": task["key"],
+            "assignee_user_id": task["assignee_user_id"],
+            "start_date": task["start_date"],
+            "due_date": task["due_date"],
+            "acceptance_criteria": task["acceptance_criteria"],
+            "depends_on": list(task["depends_on"]),
+        }
+        for task in variant["tasks"]
+    ]
+
+
 def test_preview_persists_one_plan_without_creating_tasks_and_get_is_tenant_safe(
     workbench: tuple[TestClient, object, dict[str, User], WorkProject]
 ) -> None:
@@ -186,6 +200,7 @@ def test_dispatch_is_atomic_preserves_schedule_and_is_idempotent(
             "tenant_id": "tenant_a",
             "variant_key": "A",
             "idempotency_key": "dispatch-launch-v1",
+            "tasks": _dispatch_tasks(selected),
         },
     )
 
@@ -196,6 +211,7 @@ def test_dispatch_is_atomic_preserves_schedule_and_is_idempotent(
     for task in dispatched:
         planned = expected_by_title[task["title"]]
         assert task["assignee_user_id"] == planned["assignee_user_id"]
+        assert task["reviewer_user_id"] == users["manager"].id
         assert task["start_date"] == planned["start_date"]
         assert task["due_date"] == planned["due_date"]
 
@@ -206,6 +222,7 @@ def test_dispatch_is_atomic_preserves_schedule_and_is_idempotent(
             "tenant_id": "tenant_a",
             "variant_key": "A",
             "idempotency_key": "dispatch-launch-v1",
+            "tasks": _dispatch_tasks(selected),
         },
     )
     assert repeated.status_code == 200, repeated.text
@@ -221,32 +238,235 @@ def test_dispatch_is_atomic_preserves_schedule_and_is_idempotent(
         assert {dependency.tenant_id for dependency in dependencies} == {"tenant_a"}
 
 
+def test_dispatch_uses_edited_variant_and_audits_overrides_with_payload_safe_replay(
+    workbench: tuple[TestClient, object, dict[str, User], WorkProject]
+) -> None:
+    client, engine, users, project = workbench
+    preview = _preview(client, users["manager"], project)
+    selected = next(variant for variant in preview["variants"] if variant["key"] == "A")
+    edited = _dispatch_tasks(selected)
+    edited[0]["assignee_user_id"] = users["analyst"].id
+    edited[0]["acceptance_criteria"] = "人工确认：访谈记录与范围清单均已签字"
+    edited[-1]["depends_on"] = [edited[0]["key"]]
+    edited[-1]["due_date"] = (
+        date.fromisoformat(edited[-1]["due_date"]) + timedelta(days=1)
+    ).isoformat()
+    payload = {
+        "tenant_id": "tenant_a",
+        "variant_key": "A",
+        "idempotency_key": "edited-a-intent",
+        "tasks": edited,
+    }
+
+    response = client.post(
+        f"/api/enterprise/workbench/plans/{preview['id']}/dispatch",
+        headers=_headers(users["manager"]),
+        json=payload,
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    created_by_title = {task["title"]: task for task in created}
+    original_by_key = {task["key"]: task for task in selected["tasks"]}
+    first_created = created_by_title[original_by_key[edited[0]["key"]]["title"]]
+    last_created = created_by_title[original_by_key[edited[-1]["key"]]["title"]]
+    assert first_created["assignee_user_id"] == users["analyst"].id
+    assert first_created["acceptance_criteria"] == edited[0]["acceptance_criteria"]
+    assert last_created["due_date"] == edited[-1]["due_date"]
+    assert last_created["dependencies"] == [first_created["id"]]
+
+    with Session(engine) as db:
+        stored = db.get(WorkPlan, preview["id"])
+        assert stored.selected_variant_json["key"] == "A"
+        assert stored.selected_variant_json["tasks"][0]["assignee_user_id"] == users["analyst"].id
+        assert {item["key"] for item in stored.dispatch_overrides_json} == {
+            edited[0]["key"],
+            edited[-1]["key"],
+        }
+
+    fetched = client.get(
+        f"/api/enterprise/workbench/plans/{preview['id']}?tenant_id=tenant_a",
+        headers=_headers(users["manager"]),
+    )
+    assert fetched.status_code == 200
+    assert fetched.json()["selected_variant_snapshot"]["tasks"][0][
+        "acceptance_criteria"
+    ] == edited[0]["acceptance_criteria"]
+    assert {item["key"] for item in fetched.json()["dispatch_overrides"]} == {
+        edited[0]["key"],
+        edited[-1]["key"],
+    }
+
+    replay = client.post(
+        f"/api/enterprise/workbench/plans/{preview['id']}/dispatch",
+        headers=_headers(users["manager"]),
+        json=payload,
+    )
+    assert replay.status_code == 200, replay.text
+    assert [task["id"] for task in replay.json()] == [task["id"] for task in created]
+
+    changed_payload = {**payload, "tasks": [dict(task) for task in edited]}
+    changed_payload["tasks"][0]["acceptance_criteria"] = "不同的同 key 请求"
+    conflict = client.post(
+        f"/api/enterprise/workbench/plans/{preview['id']}/dispatch",
+        headers=_headers(users["manager"]),
+        json=changed_payload,
+    )
+    assert conflict.status_code == 409
+
+
 def test_unauthorized_dispatch_is_forbidden_and_second_key_conflicts(
     workbench: tuple[TestClient, object, dict[str, User], WorkProject]
 ) -> None:
     client, _, users, project = workbench
     preview = _preview(client, users["manager"], project)
+    selected = next(variant for variant in preview["variants"] if variant["key"] == "A")
     endpoint = f"/api/enterprise/workbench/plans/{preview['id']}/dispatch"
 
     forbidden = client.post(
         endpoint,
         headers=_headers(users["member"]),
-        json={"tenant_id": "tenant_a", "variant_key": "A", "idempotency_key": "forbidden"},
+        json={
+            "tenant_id": "tenant_a",
+            "variant_key": "A",
+            "idempotency_key": "forbidden",
+            "tasks": _dispatch_tasks(selected),
+        },
     )
     assert forbidden.status_code == 403
 
     first = client.post(
         endpoint,
         headers=_headers(users["manager"]),
-        json={"tenant_id": "tenant_a", "variant_key": "A", "idempotency_key": "first"},
+        json={
+            "tenant_id": "tenant_a",
+            "variant_key": "A",
+            "idempotency_key": "first",
+            "tasks": _dispatch_tasks(selected),
+        },
     )
     assert first.status_code == 201
     conflict = client.post(
         endpoint,
         headers=_headers(users["manager"]),
-        json={"tenant_id": "tenant_a", "variant_key": "A", "idempotency_key": "second"},
+        json={
+            "tenant_id": "tenant_a",
+            "variant_key": "A",
+            "idempotency_key": "second",
+            "tasks": _dispatch_tasks(selected),
+        },
     )
     assert conflict.status_code == 409
+
+
+def test_dispatch_rejects_invalid_task_sets_graph_dates_and_assignees(
+    workbench: tuple[TestClient, object, dict[str, User], WorkProject]
+) -> None:
+    client, engine, users, project = workbench
+    preview = _preview(client, users["manager"], project)
+    selected = next(variant for variant in preview["variants"] if variant["key"] == "A")
+    base = _dispatch_tasks(selected)
+    invalid_payloads: list[list[dict]] = []
+
+    missing = [dict(task) for task in base[:-1]]
+    invalid_payloads.append(missing)
+
+    missing_editable_field = [dict(task) for task in base]
+    missing_editable_field[0].pop("acceptance_criteria")
+    invalid_payloads.append(missing_editable_field)
+
+    unknown_dependency = [dict(task) for task in base]
+    unknown_dependency[0]["depends_on"] = ["missing-task"]
+    invalid_payloads.append(unknown_dependency)
+
+    cycle = [dict(task) for task in base]
+    cycle[0]["depends_on"] = [cycle[1]["key"]]
+    cycle[1]["depends_on"] = [cycle[0]["key"]]
+    invalid_payloads.append(cycle)
+
+    backwards_dates = [dict(task) for task in base]
+    backwards_dates[0]["start_date"] = "2026-09-12"
+    backwards_dates[0]["due_date"] = "2026-09-11"
+    invalid_payloads.append(backwards_dates)
+
+    for index, tasks in enumerate(invalid_payloads):
+        response = client.post(
+            f"/api/enterprise/workbench/plans/{preview['id']}/dispatch",
+            headers=_headers(users["manager"]),
+            json={
+                "tenant_id": "tenant_a",
+                "variant_key": "A",
+                "idempotency_key": f"invalid-graph-{index}",
+                "tasks": tasks,
+            },
+        )
+        assert response.status_code == 422, response.text
+
+    with Session(engine) as db:
+        member_profile = db.exec(
+            select(EmployeeProfile).where(
+                EmployeeProfile.tenant_id == "tenant_a",
+                EmployeeProfile.user_id == users["member"].id,
+            )
+        ).one()
+        member_profile.status = "inactive"
+        db.add(member_profile)
+        db.add(Tenant(id="tenant_b", name="Tenant B"))
+        outsider = User(tenant_id="tenant_b", username="outsider-plan", password_hash="hash")
+        db.add(outsider)
+        db.flush()
+        db.add(
+            EmployeeProfile(
+                tenant_id="tenant_b",
+                user_id=outsider.id,
+                business_role="member",
+                status="active",
+            )
+        )
+        db.commit()
+        outsider_id = outsider.id
+
+    for index, assignee_id in enumerate((users["member"].id, outsider_id)):
+        tasks = [dict(task) for task in base]
+        tasks[0]["assignee_user_id"] = assignee_id
+        response = client.post(
+            f"/api/enterprise/workbench/plans/{preview['id']}/dispatch",
+            headers=_headers(users["manager"]),
+            json={
+                "tenant_id": "tenant_a",
+                "variant_key": "A",
+                "idempotency_key": f"invalid-assignee-{index}",
+                "tasks": tasks,
+            },
+        )
+        assert response.status_code == 422, response.text
+
+
+def test_member_project_owner_can_preview_and_dispatch(
+    workbench: tuple[TestClient, object, dict[str, User], WorkProject]
+) -> None:
+    client, engine, users, project = workbench
+    with Session(engine) as db:
+        stored_project = db.get(WorkProject, project.id)
+        stored_project.owner_user_id = users["member"].id
+        db.add(stored_project)
+        db.commit()
+
+    preview = _preview(client, users["member"], project)
+    selected = next(variant for variant in preview["variants"] if variant["key"] == "A")
+    response = client.post(
+        f"/api/enterprise/workbench/plans/{preview['id']}/dispatch",
+        headers=_headers(users["member"]),
+        json={
+            "tenant_id": "tenant_a",
+            "variant_key": "A",
+            "idempotency_key": "member-owner-intent",
+            "tasks": _dispatch_tasks(selected),
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()
 
 
 def test_dispatch_rolls_back_all_side_effects_on_mid_transaction_failure(
@@ -255,6 +475,7 @@ def test_dispatch_rolls_back_all_side_effects_on_mid_transaction_failure(
 ) -> None:
     client, engine, users, project = workbench
     preview = _preview(client, users["manager"], project)
+    selected = next(variant for variant in preview["variants"] if variant["key"] == "A")
 
     def fail_event(*args: object, **kwargs: object) -> None:
         raise RuntimeError("event store unavailable")
@@ -263,7 +484,14 @@ def test_dispatch_rolls_back_all_side_effects_on_mid_transaction_failure(
     with Session(engine) as db:
         current_user = db.get(User, users["manager"].id)
         with pytest.raises(RuntimeError, match="event store unavailable"):
-            dispatch_plan(db, preview["id"], "A", "atomic-key", current_user)
+            dispatch_plan(
+                db,
+                preview["id"],
+                "A",
+                "atomic-key",
+                current_user,
+                _dispatch_tasks(selected),
+            )
 
     with Session(engine) as db:
         assert db.exec(select(WorkTask)).all() == []
@@ -279,6 +507,7 @@ def test_dispatch_race_replay_returns_http_200(
 ) -> None:
     client, _, users, project = workbench
     preview = _preview(client, users["manager"], project)
+    selected = next(variant for variant in preview["variants"] if variant["key"] == "A")
 
     class ExistingDispatch(list[WorkTask]):
         created = False
@@ -295,6 +524,7 @@ def test_dispatch_race_replay_returns_http_200(
             "tenant_id": "tenant_a",
             "variant_key": "A",
             "idempotency_key": "same-key-race",
+            "tasks": _dispatch_tasks(selected),
         },
     )
 

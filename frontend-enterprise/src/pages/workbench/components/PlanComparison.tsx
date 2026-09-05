@@ -17,6 +17,7 @@ export type PlanComparisonProps = {
   variants: PlanVariant[];
   employees: EmployeeRead[];
   selectedVariantKey: PlanVariantKey;
+  editedVariantKeys?: PlanVariantKey[];
   onSelectVariant: (key: PlanVariantKey) => void;
   onUpdateTask: (
     variantKey: PlanVariantKey,
@@ -46,6 +47,7 @@ export default function PlanComparison({
   variants,
   employees,
   selectedVariantKey,
+  editedVariantKeys = [],
   onSelectVariant,
   onUpdateTask,
 }: PlanComparisonProps) {
@@ -93,6 +95,11 @@ export default function PlanComparison({
                   <p className="mt-[4px] mb-0 text-[11px] text-[#858b9c]">
                     {STRATEGY_LABEL[variant.strategy]}
                   </p>
+                  {editedVariantKeys.includes(variant.key) && (
+                    <p className="mt-[4px] mb-0 text-[9px] font-medium text-[#a65f00]">
+                      AI 原始方案估算
+                    </p>
+                  )}
                 </div>
                 <Button
                   type="button"
@@ -164,6 +171,11 @@ export default function PlanComparison({
               {unassignedCount} 项任务待人工指派
             </p>
           )}
+          {editedVariantKeys.includes(selectedVariant.key) && (
+            <p className="m-0 rounded-[9px] bg-[#fff4dd] px-[10px] py-[6px] text-[11px] font-medium text-[#a65f00]">
+              WBS 已修改，估算未重新计算
+            </p>
+          )}
         </div>
 
         <div className="mt-[16px] space-y-[12px]">
@@ -171,6 +183,10 @@ export default function PlanComparison({
             const assignee = task.assignee_user_id
               ? employeeByUserId.get(task.assignee_user_id)
               : undefined;
+            const manualAssignment = task.assignment.provenance === 'manual';
+            const manualAssignmentLabel = task.assignment.manual_assignment_kind === 'reassigned'
+              ? '人工改派'
+              : '人工指定';
             return (
               <article key={task.key} className="rounded-[13px] border border-[#edf0f5] bg-[#fbfcfe] p-[16px]">
                 <div className="flex flex-wrap items-start justify-between gap-[10px]">
@@ -198,6 +214,9 @@ export default function PlanComparison({
                       className="h-[34px] w-full rounded-[9px] border border-[#e3e7f1] bg-white px-[10px] text-[12px] text-[#464c5e] outline-none focus:border-[#18181a]"
                     >
                       <option value="">待人工指派</option>
+                      {task.assignee_user_id && !assignee && (
+                        <option value={task.assignee_user_id}>当前真人负责人 · 目录信息受限</option>
+                      )}
                       {employees.filter((row) => row.status === 'active').map((row) => (
                         <option key={row.user_id} value={row.user_id}>
                           {row.display_name || row.username} · {row.job_title || '真人员工'}
@@ -275,8 +294,14 @@ export default function PlanComparison({
                     <div className="grid gap-[9px] md:grid-cols-[minmax(0,190px)_1fr] md:items-center">
                       <EmployeeBadgeContainer employee={assignee} compact subtitle="真人任务负责人" />
                       <p className="m-0 text-[10px] leading-[17px] text-[#757f9c]">
-                        <span className="font-medium text-[#596176]">AI 推荐理由：</span>
-                        {task.assignment.rationale || '依据岗位、技能、容量与协作连续性综合推荐。'}
+                        {manualAssignment ? (
+                          <span className="font-medium text-[#596176]">{manualAssignmentLabel}</span>
+                        ) : (
+                          <>
+                            <span className="font-medium text-[#596176]">AI 推荐理由：</span>
+                            {task.assignment.rationale || '此负责人来自 AI 原始方案推荐。'}
+                          </>
+                        )}
                       </p>
                     </div>
                   ) : (
