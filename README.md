@@ -1,3 +1,20 @@
+# QuantXY · 量子星河企业工作台
+
+基于 StaffDeck 二次开发的企业协作工作台，以真实员工为任务负责人，AI 助理提供任务拆解、分发建议和协作支持。
+
+- **工作闭环**：企业目标 → 项目与任务拆解 → 人工确认分发 → 员工协同执行 → 成果提交与审核。
+- **工作空间**：经营工作台、项目中心、智能拆解、任务中心、我的工作、组织与员工。
+- **能力资产**：保留并整合 StaffDeck 的知识库、技能、SOP、工具和 AI 助理管理。
+- **权限区分**：工作权限由登录账号与员工档案决定；切换 AI 助理不会切换账号或扩大权限。
+
+完成下方原项目文档中的依赖与环境准备后，在仓库根目录运行 `scripts/dev_up.sh --detach`，通过 `http://127.0.0.1:5173/enterprise/workbench` 访问工作台。Windows 使用 `scripts/dev_up.ps1 --detach`。
+
+此仓库仅包含源码、测试和静态资源，**不包含本地员工数据库、模型密钥或 `.env` 配置**。在新环境中请从 `backend/.env.example` 创建本地配置、设置独立的 `APP_SECRET`，再通过管理界面配置模型和真实员工。请勿将密钥或业务数据库提交到 GitHub。
+
+本项目保留原 StaffDeck 的 AGPL-3.0 许可证及上游说明；以下为原项目文档。
+
+---
+
 <div align="center">
 
 <img src="packaging/assets/staffdeck_banner_en.png" alt="StaffDeck logo" />
