@@ -84,6 +84,7 @@ function renderSidebar(props: {
             onNavigate={props.onNavigate ?? (() => {})}
             isAdmin={props.isAdmin ?? false}
             scopeAgents={[agent]}
+            sidebarAgent={props.selectedAgentId === agent.id ? agent : undefined}
             scopeTeams={props.scopeTeams ?? [team]}
             selectedAgentId={props.selectedAgentId}
             onSelectAgent={props.onSelectAgent ?? (() => {})}
@@ -154,13 +155,25 @@ beforeEach(() => {
 });
 
 describe('AppSidebar agent switcher team group', () => {
+  it('identifies the assistant selector separately from the human account', async () => {
+    const user = userEvent.setup();
+    const onSelectAgent = vi.fn();
+    renderSidebar({ selectedAgentId: 'agent-1', onSelectAgent });
+    const trigger = screen.getByLabelText('切换 AI 助理或团队');
+    expect(within(trigger).getByText('当前 AI 助理')).toBeTruthy();
+    await user.click(trigger);
+    expect(await screen.findByText('仅切换 AI 能力，不改变登录账号与工作权限')).toBeTruthy();
+    await user.click(screen.getByRole('menuitem', { name: /小艾/ }));
+    expect(onSelectAgent).toHaveBeenCalledWith('agent-1');
+  });
+
   it('lists teams under a team group and emits the team scope value on select', async () => {
     const user = userEvent.setup();
     const onSelectAgent = vi.fn();
     renderSidebar({ selectedAgentId: 'agent-1', onSelectAgent });
 
     expect(screen.getByRole('button', { name: '开放广场' })).toBeTruthy();
-    await user.click(screen.getByLabelText('切换当前员工'));
+    await user.click(screen.getByLabelText('切换 AI 助理或团队'));
     const menu = await screen.findByRole('menu');
     // 分组标签与团队项上的 Badge 都写作「团队」。
     expect(within(menu).getAllByText('团队').length).toBeGreaterThanOrEqual(2);
@@ -176,7 +189,7 @@ describe('AppSidebar agent switcher team group', () => {
   it('shows the team name and team caption when a team scope is selected', () => {
     renderSidebar({ selectedAgentId: 'team:team-1' });
 
-    const trigger = screen.getByLabelText('切换当前员工');
+    const trigger = screen.getByLabelText('切换 AI 助理或团队');
     expect(within(trigger).getByText('当前团队')).toBeTruthy();
     expect(within(trigger).getByText('增长团队')).toBeTruthy();
   });
@@ -184,7 +197,7 @@ describe('AppSidebar agent switcher team group', () => {
   it('falls back to a bare team label when the selected team is unknown', () => {
     renderSidebar({ selectedAgentId: 'team:missing', scopeTeams: [team] });
 
-    const trigger = screen.getByLabelText('切换当前员工');
+    const trigger = screen.getByLabelText('切换 AI 助理或团队');
     expect(within(trigger).getByText('当前团队')).toBeTruthy();
     expect(within(trigger).getByText('团队')).toBeTruthy();
   });

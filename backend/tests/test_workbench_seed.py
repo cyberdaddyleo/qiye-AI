@@ -1918,7 +1918,8 @@ def test_demo_seed_does_not_add_workbench_examples_over_a_user_model_config() ->
 
         assert db.get(ModelConfig, "model_user_owned") is not None
         assert _model_ids(db, Department) == ()
-        assert _model_ids(db, EmployeeProfile) == ()
+        # Upgrade enrollment repairs the existing administrator only, not demo staff.
+        assert [row.user_id for row in db.exec(select(EmployeeProfile)).all()] == ["admin"]
         assert _model_ids(db, WorkProject) == ()
 
 

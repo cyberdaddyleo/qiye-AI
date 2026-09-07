@@ -535,7 +535,7 @@ function Shell({
             return;
           }
           if (agentId !== selectedAgentId) changeAgentScope(agentId);
-          navigate(EnterpriseRoute.Dashboard);
+          if (!selectedWorkbenchRoute) navigate(EnterpriseRoute.Dashboard);
         }}
         onOpenChat={() => {
           navigate(EnterpriseRoute.Gallery);

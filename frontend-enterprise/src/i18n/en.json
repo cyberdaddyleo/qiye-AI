@@ -1,4 +1,11 @@
 {
+  "当前 AI 助理": "Current AI assistant",
+  "切换 AI 助理或团队": "Switch AI assistant or team",
+  "仅切换 AI 能力，不改变登录账号与工作权限": "Switches AI capabilities only, not your account or work permissions",
+  "登录账号：": "Signed in as: ",
+  "系统管理员": "System administrator",
+  "工作台已可用。请先建立部门和真人员工档案，再创建项目并分发任务。": "Your workbench is ready. Set up departments and human employee profiles before creating projects and assigning tasks.",
+  "完善组织与员工": "Set up your organization and employees",
   "AI 负责拆解、推荐与总结，真人员工承担任务与审核责任": "AI supports decomposition, recommendations, and summaries; human employees own tasks and reviews",
   "AI 仅提供拆解和匹配建议；负责人均为真人员工，最终安排由你确认。": "AI only suggests decomposition and matching; all owners are human employees, and you confirm the final assignment.",
   "AI 推荐理由：": "AI recommendation rationale:",

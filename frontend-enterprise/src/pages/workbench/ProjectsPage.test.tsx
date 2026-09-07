@@ -228,6 +228,16 @@ describe('ProjectsPage', () => {
     expect(within(departmentSelect).queryByRole('option', { name: '历史事业部' })).toBeNull();
   });
 
+  it('guides an upgraded administrator to organization setup before creating a departmental project', async () => {
+    vi.mocked(workbenchApi.listProjects).mockResolvedValue([]);
+    vi.mocked(workbenchApi.listDepartments).mockResolvedValue([]);
+    renderProjects();
+    await screen.findByText('还没有可见项目');
+    expect(screen.getByRole('link', { name: '完善组织与员工' }).getAttribute('href'))
+      .toBe('/enterprise/organization');
+    expect(screen.queryByRole('button', { name: '新建项目' })).toBeNull();
+  });
+
   it('lets an administrator create a real project', async () => {
     const user = userEvent.setup();
     renderProjects();

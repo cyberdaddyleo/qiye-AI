@@ -25,6 +25,7 @@ from app.db.staffdeck_seed import seed_staffdeck_admin_gallery
 from app.db.workbench_seed import (
     DEFAULT_PERSONA_PROMPT,
     acquire_quantxy_seed_transaction_lock,
+    ensure_workbench_admin_profiles,
     seed_quantxy_workbench,
 )
 from app.security.auth import hash_password
@@ -955,6 +956,7 @@ def seed_demo_data(session: Session) -> None:
         session.add(admin_user)
 
     seed_quantxy_workbench(session)
+    ensure_workbench_admin_profiles(session)
     _ensure_seed_agents(session)
 
     for raw_content in (

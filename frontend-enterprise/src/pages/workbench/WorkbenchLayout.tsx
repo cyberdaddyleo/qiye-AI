@@ -32,6 +32,12 @@ export default function WorkbenchLayout({
             {description && (
               <p className="m-0 text-[13px] leading-[20px] text-[#757f9c]">{description}</p>
             )}
+            {currentUser && (
+              <p className="m-0 text-[11px] leading-[18px] text-[#757f9c]">
+                <span>登录账号：</span><span>{currentUser.username}</span>
+                {currentUser.role === 'admin' && <span className="ml-[8px] text-[#1a71ff]">系统管理员</span>}
+              </p>
+            )}
           </div>
         )}
         actions={actions}

@@ -75,7 +75,7 @@ const modelConfig = {
   enabled: true,
 };
 
-function stubAppFetch() {
+function stubAppFetch(agents: AgentProfileRead[] = [agent]) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = (init?.method || 'GET').toUpperCase();
@@ -83,7 +83,7 @@ function stubAppFetch() {
       return jsonResponse({ session_id: 'session-tl-1' });
     }
     if (url.includes('/api/auth/me')) return jsonResponse(authUser);
-    if (url.includes('/api/enterprise/agents')) return jsonResponse([agent]);
+    if (url.includes('/api/enterprise/agents')) return jsonResponse(agents);
     if (/\/api\/enterprise\/teams\/team-1\/(tasks|blackboard|events)/.test(url)) {
       return jsonResponse([]);
     }
@@ -137,6 +137,23 @@ afterEach(() => {
 });
 
 describe('App team scope selection', () => {
+  it('keeps the human workbench and account when switching AI assistants', async () => {
+    const user = userEvent.setup();
+    stubAppFetch([agent, { ...agent, id: 'agent-finance', name: '财务' }]);
+    window.localStorage.setItem(ENTERPRISE_AGENT_STORAGE_KEY, 'agent-1');
+    window.history.pushState({}, '', '/enterprise/projects?view=mine');
+    render(<I18nProvider><App /></I18nProvider>);
+    await screen.findByText('还没有可见项目');
+    await user.click(screen.getByLabelText('切换 AI 助理或团队'));
+    await user.click(await screen.findByRole('menuitem', { name: /财务/ }));
+    await waitFor(() => {
+      expect(window.localStorage.getItem(ENTERPRISE_AGENT_STORAGE_KEY)).toBe('agent-finance');
+    });
+    expect(window.location.pathname + window.location.search).toBe('/enterprise/projects?view=mine');
+    expect(screen.getByRole('heading', { name: '项目中心' })).toBeTruthy();
+    expect(JSON.parse(window.localStorage.getItem(AUTH_STORAGE_KEY)!).user.id).toBe('user-1');
+  });
+
   it('opens the team group in the chat app when a team is selected', async () => {
     const user = userEvent.setup();
     const fetchMock = stubAppFetch();
@@ -144,7 +161,7 @@ describe('App team scope selection', () => {
     window.history.pushState({}, '', '/enterprise/agents');
     render(<I18nProvider><App /></I18nProvider>);
 
-    const switcher = await screen.findByLabelText('切换当前员工');
+    const switcher = await screen.findByLabelText('切换 AI 助理或团队');
     await user.click(switcher);
     const menu = await screen.findByRole('menu');
     const teamItem = within(menu)
@@ -169,7 +186,7 @@ describe('App team scope selection', () => {
     window.history.pushState({}, '', '/enterprise/agents');
     render(<I18nProvider><App /></I18nProvider>);
 
-    const switcher = await screen.findByLabelText('切换当前员工');
+    const switcher = await screen.findByLabelText('切换 AI 助理或团队');
     await waitFor(() => {
       expect(switcher.textContent).toContain('当前团队');
       expect(switcher.textContent).toContain('增长团队');

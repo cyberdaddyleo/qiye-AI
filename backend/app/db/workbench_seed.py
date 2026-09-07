@@ -60,6 +60,33 @@ _WORKBENCH_BUSINESS_MODELS = (
 _PRISTINE_IDENTITY_TABLES = {"tenants", "users", "persona_configs"}
 
 
+def ensure_workbench_admin_profiles(session: Session) -> None:
+    """Enroll existing web administrators without importing the demo organization.
+
+    Called inside the startup seed transaction and its cross-process lock. An
+    existing profile (including an inactive one) always wins. System authority
+    continues to come from User.role; no CEO/manager grant is stored here.
+    """
+    admins = session.exec(
+        select(User).where(User.role == "admin", User.source == "web")
+    ).all()
+    for user in admins:
+        profile = session.exec(
+            select(EmployeeProfile).where(
+                EmployeeProfile.tenant_id == user.tenant_id,
+                EmployeeProfile.user_id == user.id,
+            )
+        ).first()
+        if profile is None:
+            session.add(EmployeeProfile(
+                tenant_id=user.tenant_id,
+                user_id=user.id,
+                job_title="系统管理员",
+                business_role="member",
+            ))
+    session.flush()
+
+
 @dataclass(frozen=True)
 class _SeedLockState:
     file_handle: BinaryIO | None

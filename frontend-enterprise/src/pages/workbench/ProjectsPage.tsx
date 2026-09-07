@@ -142,6 +142,7 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
     () => new Map(departments.map((department) => [department.id, department])),
     [departments],
   );
+  const needsOrganizationSetup = canCreate && activeDepartments.length === 0;
 
   function openCreateDialog() {
     setForm({ ...EMPTY_FORM, departmentId: activeDepartments[0]?.id || '' });
@@ -189,13 +190,19 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
       description="创建项目并跟踪目标、进度与健康状态"
       currentUser={currentUser}
       onLogout={onLogout}
-      actions={!loading && !loadFailure && canCreate ? (
+      actions={!loading && !loadFailure && canCreate && !needsOrganizationSetup ? (
         <Button type="button" onClick={openCreateDialog} className="h-[34px] gap-[6px] rounded-[10px] bg-[#18181a] px-[14px] text-[12px] text-white hover:bg-[#303030]">
           <Plus className="size-[14px]" aria-hidden="true" />
           新建项目
         </Button>
       ) : undefined}
     >
+      {!loading && !loadFailure && needsOrganizationSetup && (
+        <section className="mb-[18px] flex flex-wrap items-center justify-between gap-[12px] rounded-[12px] border border-[#dce8ff] bg-[#eef4ff] px-[20px] py-[16px]">
+          <p className="m-0 text-[13px] leading-[20px] text-[#464c5e]">工作台已可用。请先建立部门和真人员工档案，再创建项目并分发任务。</p>
+          <Link to="/enterprise/organization" className="shrink-0 text-[13px] font-medium text-[#1a71ff] underline underline-offset-4">完善组织与员工</Link>
+        </section>
+      )}
       {loading ? (
         <div role="status" aria-label="项目加载中" className="grid grid-cols-1 gap-[16px] lg:grid-cols-2">
           {Array.from({ length: 4 }, (_, index) => (
@@ -214,7 +221,7 @@ export default function ProjectsPage({ currentUser, onLogout }: ProjectsPageProp
           <p className="mt-[6px] mb-0 text-[12px] text-[#858b9c]">
             {canCreate ? '创建首个项目，把目标交给真人团队推进。' : '参与项目后会在这里显示。'}
           </p>
-          {canCreate && (
+          {canCreate && !needsOrganizationSetup && (
             <Button type="button" onClick={openCreateDialog} className="mt-[18px] h-[34px] rounded-[10px] bg-[#18181a] px-[16px] text-[12px] text-white hover:bg-[#303030]">
               新建项目
             </Button>

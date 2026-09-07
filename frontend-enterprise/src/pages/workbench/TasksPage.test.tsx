@@ -1044,7 +1044,7 @@ describe('MyWorkPage', () => {
 
   it('shows role-aware priorities, personal counts, submissions, collaboration, and workload', async () => {
     const user = userEvent.setup();
-    renderMyWork();
+    renderMyWork({ now: new Date('2026-09-05T04:00:00.000Z'), timeZone: 'Asia/Shanghai' });
 
     expect(await screen.findByRole('heading', { name: '林珊，今天先完成最重要的工作' })).toBeTruthy();
     expect(within(screen.getByRole('article', { name: '进行中' })).getByText('1')).toBeTruthy();

@@ -265,7 +265,7 @@ function AgentSwitcher({
   const currentTeam = selectedTeamId
     ? scopeTeams.find((team) => team.id === selectedTeamId)
     : undefined;
-  const caption = selectedTeamId ? '当前团队' : currentAgent ? '当前员工' : '未选择';
+  const caption = selectedTeamId ? '当前团队' : currentAgent ? '当前 AI 助理' : '未选择';
   const nameLabel = selectedTeamId
     ? currentTeam?.name || '团队'
     : currentAgent
@@ -275,8 +275,9 @@ function AgentSwitcher({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <div
-          aria-label="切换当前员工"
+        <button
+          type="button"
+          aria-label="切换 AI 助理或团队"
           className={cn(
             'flex w-full items-center gap-[12px] rounded-[18px] px-[8px] pt-[8px] pb-[4px] text-left transition-colors',
             'group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0 group-data-[collapsible=icon]:py-0',
@@ -304,12 +305,15 @@ function AgentSwitcher({
             </span>
           </span>
           <IconChevronDown className="size-[14px] shrink-0 text-sidebar-foreground group-data-[collapsible=icon]:hidden" />
-        </div>
+        </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
         className="flex max-h-[320px] w-(--radix-dropdown-menu-trigger-width) flex-col gap-[4px] overflow-y-auto"
       >
+        <DropdownMenuLabel className="whitespace-normal px-[8px] text-[10px] font-normal leading-[16px] text-muted-foreground">
+          仅切换 AI 能力，不改变登录账号与工作权限
+        </DropdownMenuLabel>
         {employeeAgents.map((agent) => (
           <DropdownMenuItem
             key={agent.id}
@@ -442,7 +446,7 @@ function CollapsedAgentSwitcher({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label="切换当前员工"
+          aria-label="切换 AI 助理或团队"
           className="flex flex-col items-center gap-[2px] pt-[8px]"
         >
           {currentAgent ? (
@@ -458,6 +462,9 @@ function CollapsedAgentSwitcher({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="flex max-h-[320px] min-w-[180px] flex-col gap-[4px] overflow-y-auto">
+        <DropdownMenuLabel className="max-w-[220px] whitespace-normal px-[8px] text-[10px] font-normal leading-[16px] text-muted-foreground">
+          仅切换 AI 能力，不改变登录账号与工作权限
+        </DropdownMenuLabel>
         {employeeAgents.map((agent) => (
           <DropdownMenuItem
             key={agent.id}
